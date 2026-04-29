@@ -1,0 +1,31 @@
+# Build output
+Debug/
+Release/
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+*.o
+*.d
+*.su
+*.cyclo
+
+# Local/debug captures and generated analysis artifacts
+*.pcap
+*.pcapng
+.wireshark/
+mcu_pdf_page.png
+pinout_table_filin2*.html
+
+# Local Codex/debug backups and downloaded STM reference copy
+.codex_backup_*/
+.stm_webcam_ref/
+
+# IDE/user-local noise
+.metadata/
+*.log
+*.tmp
+*.bak
+Thumbs.db
+desktop.ini

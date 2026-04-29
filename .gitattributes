@@ -1,0 +1,21 @@
+* text=auto
+
+*.c text eol=lf
+*.h text eol=lf
+*.s text eol=lf
+*.ld text eol=lf
+*.ioc text eol=lf
+*.md text eol=lf
+*.project text eol=lf
+*.cproject text eol=lf
+*.mxproject text eol=lf
+*.launch text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.elf binary
+*.bin binary
+*.hex binary
