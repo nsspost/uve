@@ -354,17 +354,13 @@ UINT USBD_VIDEO_StreamRequest(UX_DEVICE_CLASS_VIDEO_STREAM *video_stream,
   */
 ULONG USBD_VIDEO_StreamGetMaxPayloadBufferSize(VOID)
 {
-  ULONG max_playload = 0U;
+  ULONG max_playload = USBD_VIDEO_EPIN_HS_MPS;
 
   /* USER CODE BEGIN USBD_VIDEO_StreamGetMaxPayloadBufferSize */
 
-  if(_ux_system_slave->ux_system_slave_speed == UX_FULL_SPEED_DEVICE)
+  if (USBD_VIDEO_EPIN_FS_MPS > max_playload)
   {
     max_playload = USBD_VIDEO_EPIN_FS_MPS;
-  }
-  else
-  {
-    max_playload = USBD_VIDEO_EPIN_HS_MPS;
   }
 
   /* USER CODE END USBD_VIDEO_StreamGetMaxPayloadBufferSize */
