@@ -1694,3 +1694,303 @@ UVC payload header:
 - Вернуть полный предыдущий baseline:
   - `uvc_isoin_incomplete_handling_enable = 1`;
   - `uvc_runtime_flush_before_tx_enable = 1`.
+
+## 2026-04-29 20:28: зависание после валидных кадров, endpoint/core перестает отвечать
+
+Свежий `UVC.pcapng` после возврата baseline:
+
+- Устройство: `0483:5750`, USB address `58`, stream EP `0x81`.
+- `SET_INTERFACE alt=1`: `1.261517 s`, успешно.
+- До `2.882965 s` идут нормальные UVC/MJPEG пакеты:
+  - header-only packets `02 80` / `02 81`;
+  - MJPEG payload packets с `FF D8`;
+  - EOF packets с UVC header `02 82` / `02 83`.
+- Первый фатальный сбой: frame `3415`, `2.898963 s`.
+  - `IRP USBD_STATUS = USBD_STATUS_ISOCH_REQUEST_FAILED (0xc0000b00)`;
+  - `128/128` ISO packets имеют `USBD_STATUS_XACT_ERROR (0xc0000011)`;
+  - длина всех ISO packets `0`.
+- После этого полезных данных по EP `0x81` больше нет.
+- При закрытии приложения Camera `SET_INTERFACE alt=0` по EP0 тоже завершается `USBD_STATUS_XACT_ERROR`.
+
+Counters в момент зависания:
+
+- `streaming_enabled = 1`, `current_alt_setting = 1`, `huvc_state = 2`.
+- `ep_busy = 0`: class state не завис в busy.
+- `cnt_prime_ok = 45554`, `cnt_transmit_fail = 0`, `last_status = 0`.
+- `cnt_eof = 48`: до срыва host успел получить целые кадры.
+- `cnt_iso_in_incomplete = 32705`, `cnt_underrun = 32500`, `cnt_dropped_frames = 32501`.
+- `cnt_flush_before_tx = 45554`: текущая сборка делает `USBD_LL_FlushEP()` перед каждой постановкой EP1 transfer.
+
+Вывод:
+
+- Корень текущего зависания ниже JPEG producer и ниже UVC header/FID/EOF.
+- Это не выглядит как несогласованность fps/bitrate/descriptors: stream успевает передать несколько десятков корректных кадров, а затем endpoint внезапно получает полный URB `XACT_ERROR`.
+- Это не выглядит как нехватка готового кадра: даже после срыва firmware продолжает получать `USBD_OK` от `USBD_LL_Transmit()`, но на шине новых `02 xx` packets больше нет.
+- Самый подозрительный нестоковый элемент сейчас: flush EP1 FIFO перед каждым `USBD_LL_Transmit()`. Он был добавлен как лечение по мотивам чужого опыта, но на этой сборке выполняется десятки тысяч раз, включая header-only packets.
+
+Следующий эксперимент, чтобы не ходить кругами:
+
+1. Не менять JPEG, descriptors, fps и frame size.
+2. Оставить включенными подтвержденные важные части:
+   - `IISOIXFR` EP0 -> EP1 remap;
+   - ручной odd/even frame resync;
+   - drop текущего MJPEG frame при реальном `IsoINIncomplete`.
+3. Ввести управляемую политику flush:
+   - `0`: без flush перед normal TX;
+   - `1`: текущий режим, flush перед каждым TX;
+   - `2`: flush только на recovery (`SET_INTERFACE alt=1`, `IsoINIncomplete`, busy timeout), но не перед каждым нормальным payload/header-only TX.
+4. Добавить диагностику:
+   - сколько раз flush выполнялся при установленном `DIEPCTL.EPENA`;
+   - `DIEPCTL/DIEPTSIZ/DIEPINT` до и после flush;
+   - длину header-only streak между payload frames.
+5. Проверить pcap в режиме `flush_policy = 2`.
+
+Ожидаемая развилка:
+
+- Если `flush_policy = 2` уберет полный `128/128 XACT_ERROR`, значит мы сами клиним/ломаем EP1 чрезмерной очисткой FIFO.
+- Если не изменит картину, следующий подозреваемый - слишком агрессивный header-only поток между маленькими JPEG; тогда проверять режим, где endpoint не arm-ится бесконечными 2-байтными packetами, а повторяет последний полный кадр или ждет ближайшего настоящего payload.
+
+## 2026-04-29 20:42: повторный pcap перед `flush_policy = 2`
+
+Свежий pcap подтвердил ту же причину, но дал более точную точку начала:
+
+- Устройство: `0483:5750`, USB address `57`, EP `0x81`.
+- Последний большой payload перед срывом: frame `21248`, `2.075773 s`, `1678` байт.
+- Следующий EP1 URB: frame `21258`, `2.091769 s`, `224` байта header-only данных `02 81`, но уже с `16` ISO descriptors `USBD_STATUS_XACT_ERROR`.
+- Следующий EP1 URB: frame `21528`, `2.107769 s`, `USBD_STATUS_ISOCH_REQUEST_FAILED`, `128/128` ISO descriptors `XACT_ERROR`, длина `0`.
+
+Counters:
+
+- `ep_busy = 1`: последний IN transfer не получил нормальный completion.
+- `cnt_eof = 18`: до срыва были целые кадры.
+- `cnt_flush_before_tx = 91813`: per-packet flush снова совпадает с числом успешных постановок transfer.
+- `cnt_header_only = 4841`: перед срывом есть заметный поток коротких header-only packets.
+
+Уточненный вывод:
+
+- Первый видимый на хосте сбой появляется в header-only окне между кадрами, а не на JPEG payload.
+- Поэтому следующий эксперимент не должен менять JPEG, размер кадра, FID/EOF или descriptors.
+- Проверяем одну вещь: не провоцирует ли клин EP1 постоянный `USBD_LL_FlushEP()` перед каждым 2-байтным или payload packet.
+
+Изменение в коде:
+
+- Добавлен `uvc_runtime_flush_policy`:
+  - `0`: без flush;
+  - `1`: flush перед каждым TX, старое поведение;
+  - `2`: recovery-only flush, новое поведение по умолчанию.
+- `uvc_runtime_flush_before_tx_enable = 0` по умолчанию.
+- `uvc_runtime_flush_policy = 2` по умолчанию.
+- `USBD_LL_FlushEP()` теперь вызывается через `UVC_FlushStreamEP()`:
+  - при `SET_INTERFACE alt0/alt1`;
+  - при `IsoINIncomplete`;
+  - при busy-timeout;
+  - перед каждым TX только если `uvc_runtime_flush_policy == 1` или вручную включен старый `uvc_runtime_flush_before_tx_enable`.
+- Добавлены диагностические поля:
+  - `cnt_flush_recovery`;
+  - `cnt_flush_while_epena`;
+  - `last_flush_reason`;
+  - `flush_before_diepctl`, `flush_before_dieptsiz`, `flush_before_diepint`;
+  - `flush_after_diepctl`, `flush_after_dieptsiz`, `flush_after_diepint`.
+
+Что смотреть после следующего запуска:
+
+- `cnt_flush_before_tx` должен остаться около `0` при штатной передаче.
+- `cnt_flush_recovery` должен расти только при alt switch / incomplete / busy recovery.
+- Если stream стабилизируется или первый `XACT_ERROR` исчезнет, причина была в чрезмерной очистке FIFO перед normal TX.
+- Если stream снова падает в header-only окне, следующий эксперимент: уменьшить/отключить бесконечную серию header-only packets между кадрами.
+
+## 2026-04-29 20:54: `flush_policy = 2` не убрал первый header-only XACT
+
+Результат проверки:
+
+- `cnt_flush_before_tx = 0`: per-TX flush действительно отключен.
+- `cnt_flush_recovery = 36046`.
+- `cnt_flush_while_epena = 36043`, практически равно `cnt_iso_in_incomplete = 36043`.
+- Последний flush был из ISO recovery: `last_flush_reason = 3`.
+- Перед flush регистры EP1:
+  - `DIEPCTL = 0x80448200`: `EPENA` установлен, endpoint активен;
+  - `DIEPTSIZ = 0x20080000`;
+  - `DIEPINT = 0x00000080`.
+
+Что видно в pcap:
+
+- До `2.876699 s` идут нормальные MJPEG payload URB.
+- На `2.892669 s` header-only URB имеет `156` байт данных `02 81`, но `50` ISO descriptors уже `XACT_ERROR`.
+- На `2.908665 s` следующий URB полностью `128/128 XACT_ERROR`.
+
+Вывод:
+
+- Гипотеза "главная причина только в flush перед каждым normal TX" ослаблена.
+- Срыв все еще начинается в header-only окне, то есть JPEG payload и FID/EOF по-прежнему не выглядят корнем.
+- Новый подозреваемый: `FlushEP` внутри `IsoINIncomplete` при еще активном EP (`EPENA=1`). Такой flush выполнялся десятки тысяч раз и может мешать восстановлению вместо помощи.
+
+Изменение:
+
+- Добавлен `uvc_runtime_flush_on_iso_enable`.
+- Значение по умолчанию: `0`.
+- В `USBD_UVC_IsoINIncomplete()` flush теперь выполняется только если:
+  - `uvc_runtime_flush_policy == UVC_FLUSH_POLICY_RECOVERY`;
+  - и `uvc_runtime_flush_on_iso_enable != 0`.
+
+Следующая проверка:
+
+- `cnt_flush_before_tx` должен быть `0`.
+- `cnt_flush_recovery` должен расти только на `SET_INTERFACE` и busy-timeout, но не на каждый `IsoINIncomplete`.
+- `cnt_flush_while_epena` должен перестать расти вместе с `cnt_iso_in_incomplete`.
+- Если срыв останется тем же, следующий шаг - проверять саму стратегию header-only packets между кадрами: ограничить их количество или не arm-ить EP1 бесконечными 2-байтными пакетами.
+
+## 2026-04-29 20:58: отключение ISO flush признано неудачным
+
+Результат проверки `uvc_runtime_flush_on_iso_enable = 0`:
+
+- Stream визуально не стартует нормально, экран зеленый.
+- `cnt_eof = 1`, `cnt_data_in = 25`.
+- `cnt_iso_in_incomplete = 149990`, `cnt_dropped_frames = 149754`.
+- `cnt_flush_before_tx = 0`, `cnt_flush_recovery = 3`, `cnt_flush_while_epena = 0`.
+
+Что видно в pcap:
+
+- Первый и единственный ненулевой UVC URB: frame `917`, `1.040000 s`.
+- URB формально `SUCCESS`, но `103/128` ISO descriptors уже `XACT_ERROR`.
+- Данные начинаются не с UVC header `02 xx`, а с хвоста JPEG (`01 ca 1f 63`, затем `ff d9`).
+- Следующий URB уже полностью `128/128 XACT_ERROR`.
+
+Вывод:
+
+- Отключать flush/resync из `IsoINIncomplete` нельзя: без него поток может начать отдавать хвост/середину кадра, что объясняет зеленую картинку.
+- Рабочее состояние для дальнейших проверок:
+  - `uvc_runtime_flush_before_tx_enable = 0`;
+  - `uvc_runtime_flush_policy = UVC_FLUSH_POLICY_RECOVERY`;
+  - `uvc_runtime_flush_on_iso_enable = 1`.
+
+Новая проверка:
+
+- Введен `uvc_runtime_no_frame_gap_enable = 1`.
+- В `UVC_RuntimeFinishFrame()` при этом не выставляется `next_frame_tick`, даже если `uvc_frame_interval_ms != 0`.
+- Цель: проверить, является ли причиной именно межкадровое окно с длинной серией 2-байтных header-only packets.
+- Это диагностический режим, а не финальное согласование fps/descriptors: если он стабилизирует поток, дальше нужно будет аккуратно согласовать реальный темп кадров с UVC descriptors/probe.
+
+## 2026-04-29 21:02: `no_frame_gap = 1` подтвердил проблему темпа
+
+Свежий pcap после режима `uvc_runtime_no_frame_gap_enable = 1` показал новую важную вещь:
+
+- Устройство: USB address `64`, EP `0x81`.
+- В pcap есть только один ненулевой UVC URB: frame `1703`, time `1.434938 s`, `Packet Data Length = 47818`.
+- Внутри URB повторяется паттерн ISO lengths `512, 512, 394`. Для текущего JPEG `1412` байт это один полный UVC frame: `510 + 510 + 392` байта JPEG плюс три 2-байтных UVC header.
+- Значит `no_frame_gap = 1` отправляет десятки полных кадров в одно 16-ms host URB window, то есть намного быстрее заявленного `dwFrameInterval`.
+- Счетчики это подтверждают: `cnt_eof = 33`, `cnt_data_in = 101`, `cnt_payload = 114664`, `cnt_header_only = 0`.
+
+Вывод:
+
+- Бесконечная отправка следующего кадра сразу после EOF не является корректным решением. Она убирает header-only окно, но нарушает темп descriptors/probe и может сама ломать поток.
+- Рабочее направление: не выключать pacing полностью, а уменьшить межкадровое окно согласованно через `dwFrameInterval` / `uvc_frame_interval_ms`, чтобы не было длинной серии header-only packets.
+
+Изменение для следующего теста:
+
+- `uvc_runtime_no_frame_gap_enable = 0` по умолчанию.
+- `UVC_FRAME_INTERVAL_100NS = 100000` (`10 ms`, диагностически около `100 fps`).
+- `UVC_FRAME_RATE` теперь вычисляется из `UVC_FRAME_INTERVAL_100NS`, чтобы bitrate в descriptor не расходился с interval.
+- `uvc_runtime_flush_before_tx_enable = 0`, `uvc_runtime_flush_policy = 2`, `uvc_runtime_flush_on_iso_enable = 1` оставлены как последняя рабочая база.
+
+Что проверить:
+
+- Если поток станет стабильнее, причина действительно в слишком длинном header-only окне при маленьком JPEG и 30 fps.
+- Если поток снова сорвется, смотреть в pcap: первый сбой снова будет в header-only окне или уже на payload.
+- В counters особенно важны: `cnt_eof`, `cnt_header_only`, `cnt_payload`, `cnt_iso_in_incomplete`, `cnt_flush_recovery`, `last_len`, `last_header`, `last_offset`.
+
+## 2026-04-29 21:12: 10 ms pacing подтвердил header-only как точку срыва
+
+Новый pcap после перехода с 30 fps на диагностические 10 ms:
+
+- Устройство: `0483:5750`, USB address `10`, EP `0x81`.
+- Полезные UVC URB больше не идут одним огромным залпом. Они идут примерно каждые `16 ms`.
+- Последний ненулевой URB: frame `4775`, time `3.677778 s`, `Packet Data Length = 998`, `Isochronous transfer error count = 80`.
+- Содержимое последнего URB по ISO descriptors: сначала `512`, затем `394` байта - это хвост MJPEG кадра; дальше длинная серия `2`-байтных header-only packets; затем `XACT_ERROR`.
+
+Счетчики:
+
+- `cnt_eof = 241`: до срыва кадры действительно завершались.
+- `cnt_header_only = 18554`: даже при 10 ms остается большой поток коротких idle packets.
+- `cnt_payload = 45958`.
+- `cnt_flush_before_tx = 0`: per-TX flush не участвует.
+- `cnt_flush_recovery = 45267`, `cnt_flush_while_epena = 45264`: после срыва recovery почти всегда flush-ит активный EP.
+
+Вывод:
+
+- Темп 10 ms помог отделить проблему от "мы шлем бесконечно быстро", но срыв все еще начинается в header-only участке после EOF.
+- Следующая гипотеза стала сильнее: короткие 2-байтные packets в межкадровом idle window провоцируют или проявляют клин EP/core. Их надо убрать из штатного пути, а не лечить последствия recovery.
+
+Изменение для следующего теста:
+
+- Добавлен `uvc_runtime_idle_header_only_enable = 0` по умолчанию.
+- Если `next_frame_tick` еще в будущем, `UVC_PrimeNextPacket()` не вызывает `USBD_LL_Transmit()` и увеличивает `uvc_runtime_idle_gap_skips`.
+- `IsoINIncomplete` во время такого idle-gap не делает `FlushEP()` и не вызывает requeue, а увеличивает `uvc_runtime_idle_iso_skips`.
+- Добавлена компактная debugger-visible структура `uvc_watch`, чтобы смотреть основные поля вместо длинного `uvc_runtime_dbg`.
+
+Что проверять:
+
+- `uvc_watch.cnt_header_only` должен расти намного медленнее или не расти в межкадровом ожидании.
+- `uvc_watch.cnt_idle_gap_skip` должен расти между кадрами.
+- Если pcap теперь покажет XACT в idle-gap, но следующий кадр после него продолжит идти, значит мы ушли от permanent stall.
+- Если поток все равно зависнет на payload, тогда следующий фокус - уже не header-only, а recovery/flush при active frame.
+
+## 2026-04-29 21:19: idle skip тоже не является решением
+
+Результат проверки режима, где в межкадровом ожидании EP1 вообще не arm-ится:
+
+- Устройство: `0483:5750`, USB address `12`, EP `0x81`.
+- `cnt_header_only = 0`, то есть 2-байтные UVC idle packets действительно убраны.
+- `cnt_idle_gap_skip = 27796`, то есть idle-gap активно пропускал `USBD_LL_Transmit`.
+- Последний ненулевой URB: frame `4817`, time `4.985506 s`, `Packet Data Length = 906`, `Isochronous transfer error count = 90`.
+- Содержимое последнего URB: `512 + 394` байта payload, затем много нулевых ISO descriptors, затем `XACT_ERROR`.
+
+Вывод:
+
+- Header-only был плохим наполнителем idle-gap, но полностью пустой idle-gap тоже плох для HS isoch IN.
+- Хост продолжает выделять микрофреймы. Если устройство не arm-ит endpoint, в capture появляются пустые/ошибочные ISO descriptors; после такого участка следующий payload не восстанавливает поток.
+- Поэтому нужна третья проверка: держать endpoint arm-нутым, но не отправлять UVC payload header. Самый чистый вариант - zero-length isoch packet.
+
+Изменение для следующего теста:
+
+- Добавлен `uvc_runtime_idle_packet_mode`.
+- Режимы:
+  - `0`: skip, не arm-ить EP1 в idle-gap;
+  - `1`: старый header-only UVC packet;
+  - `2`: zero-length isoch packet.
+- По умолчанию выбран `UVC_IDLE_PACKET_ZLP`.
+- Добавлен счетчик `uvc_runtime_idle_zlp_packets`, отображается как `uvc_watch.cnt_idle_zlp`.
+
+Что проверять:
+
+- `uvc_watch.cnt_idle_zlp` должен расти между кадрами.
+- `uvc_watch.cnt_header_only` должен оставаться около нуля.
+- Если pcap покажет стабильные нулевые idle packets без последующего permanent stall, это будет сильный кандидат на рабочее решение.
+- Если ZLP также роняет поток, следующий шаг - менять саму структуру потока: увеличивать размер JPEG/уменьшать заявленную частоту так, чтобы payload занимал большую часть host URB window, либо пересматривать HS isoch schedule/packet size.
+
+## 2026-04-29 21:25: idle ZLP тоже не устранил срыв потока
+
+Свежий pcap после режима `uvc_runtime_idle_packet_mode = UVC_IDLE_PACKET_ZLP`:
+
+- Устройство: `0483:5750`, USB address `11`, EP `0x81`.
+- Header-only пакетов больше нет: `cnt_header_only = 0`.
+- ZLP действительно отправляются: `cnt_idle_zlp = 35398`.
+- Поток успевает передать много целых кадров: `cnt_eof = 460`.
+- Ошибки остаются: `cnt_iso_in_incomplete = 16893`, `cnt_underrun = 17289`, `cnt_dropped_frames = 16874`.
+- В pcap есть частичный URB frame `2873`, time `2.542069 s`, `Packet Data Length = 916`, `Isochronous transfer error count = 63`. Внутри чередуются нулевые ISO descriptors, `XACT_ERROR`, затем `512 + 404` payload, затем снова ошибки.
+- После этого поток не падает мгновенно и продолжает идти до примерно `5.7 s`, но затем снова уходит в нулевые URB без устойчивого восстановления payload.
+
+Вывод:
+
+- Три варианта межкадрового окна уже проверены:
+  - UVC header-only packets;
+  - полный skip/no-arm;
+  - zero-length isoch packets.
+- Все три меняют форму ошибки, но не дают устойчивого решения.
+- Это снижает вероятность, что первопричина в JPEG, FID/EOF, размере тестового кадра или конкретном наполнителе idle-gap.
+- Более вероятно, что мы упираемся в поведение classic STM USB Device Library/HAL PCD на HS isoch IN recovery: endpoint/core после серии `XACT_ERROR` продолжает принимать `USBD_LL_Transmit()` как `USBD_OK`, но host перестает стабильно получать полезный payload.
+
+Решение по направлению:
+
+- Сохранить текущее состояние отдельным git checkpoint.
+- Не продолжать латать idle-gap в classic stack без новой сильной гипотезы.
+- Следующий чистый эксперимент - отдельная ветка с USBX `Ux_Device_Video` / ST USBX middleware, чтобы сравнить поведение на другом официальном ST stack.

@@ -9,12 +9,13 @@
 #define UVC_IN_EP                    0x81U
 #define UVC_IN_PACKET                512U
 #define UVC_HS_EP_INTERVAL           1U
-#define UVC_FRAME_INTERVAL_100NS     333333U
+/* Diagnostic 10 ms frame pacing: reduces header-only gaps without flooding host. */
+#define UVC_FRAME_INTERVAL_100NS     100000U
 #define UVC_FRAME_INTERVAL_MS        ((UVC_FRAME_INTERVAL_100NS + 9999U) / 10000U)
 #define UVC_FRAME_WIDTH              160U
 #define UVC_FRAME_HEIGHT             120U
 #define UVC_MAX_FRAME_SIZE           8192U
-#define UVC_FRAME_RATE               30U
+#define UVC_FRAME_RATE               ((10000000U + (UVC_FRAME_INTERVAL_100NS / 2U)) / UVC_FRAME_INTERVAL_100NS)
 #define UVC_PRODUCER_INTERVAL_MS     200U
 #define UVC_FRAME_BITRATE            (UVC_MAX_FRAME_SIZE * 8U * UVC_FRAME_RATE)
 
@@ -31,6 +32,12 @@
 #define UVC_PRIME_REASON_PAYLOAD     5U
 #define UVC_PRIME_REASON_HEADER_ONLY 6U
 #define UVC_PRIME_REASON_TX_FAIL     7U
+#define UVC_PRIME_REASON_IDLE_GAP    8U
+#define UVC_PRIME_REASON_IDLE_ZLP    9U
+
+#define UVC_IDLE_PACKET_SKIP         0U
+#define UVC_IDLE_PACKET_HEADER       1U
+#define UVC_IDLE_PACKET_ZLP          2U
 
 typedef struct
 {
@@ -81,8 +88,17 @@ typedef struct
     uint32_t cnt_busy_timeout;
     uint32_t cnt_flush_before_tx;
     uint32_t cnt_flush_before_tx_fail;
+    uint32_t cnt_flush_recovery;
+    uint32_t cnt_flush_while_epena;
     uint32_t last_status;
     uint32_t last_flush_status;
+    uint32_t last_flush_reason;
+    uint32_t flush_before_diepctl;
+    uint32_t flush_before_dieptsiz;
+    uint32_t flush_before_diepint;
+    uint32_t flush_after_diepctl;
+    uint32_t flush_after_dieptsiz;
+    uint32_t flush_after_diepint;
     uint32_t last_prime_reason;
     uint32_t last_len;
     uint32_t last_header;
@@ -97,6 +113,38 @@ typedef struct
     uint32_t next_frame_tick;
 } uvc_runtime_diag_t;
 
+typedef struct
+{
+    uint32_t streaming_enabled;
+    uint32_t ep_busy;
+    uint32_t current_alt_setting;
+    uint32_t huvc_state;
+    uint32_t frame_active;
+    uint32_t fid;
+    uint32_t cnt_eof;
+    uint32_t cnt_data_in;
+    uint32_t cnt_iso_in_incomplete;
+    uint32_t cnt_underrun;
+    uint32_t cnt_dropped_frames;
+    uint32_t cnt_frame_load;
+    uint32_t cnt_payload;
+    uint32_t cnt_header_only;
+    uint32_t cnt_idle_gap_skip;
+    uint32_t cnt_idle_iso_skip;
+    uint32_t cnt_idle_zlp;
+    uint32_t cnt_flush_recovery;
+    uint32_t cnt_flush_while_epena;
+    uint32_t last_prime_reason;
+    uint32_t last_len;
+    uint32_t last_header;
+    uint32_t last_offset;
+    uint32_t last_frame_size;
+    uint32_t next_frame_tick;
+    uint32_t last_submit_tick;
+    uint32_t last_complete_tick;
+    uint32_t frame_interval_ms;
+} uvc_runtime_watch_t;
+
 extern USBD_ClassTypeDef USBD_UVC;
 
 uint8_t USBD_UVC_RegisterInterface(USBD_HandleTypeDef *pdev, void *fops);
@@ -104,8 +152,17 @@ void USBD_UVC_WatchdogPoll(void);
 bool uvc_lowlevel_reopen_stream_ep(void);
 
 extern volatile uvc_runtime_diag_t uvc_runtime_dbg;
+extern volatile uvc_runtime_watch_t uvc_watch;
 extern volatile uint32_t uvc_runtime_busy_timeout_ms;
 extern volatile uint32_t uvc_runtime_flush_before_tx_enable;
+extern volatile uint32_t uvc_runtime_flush_policy;
+extern volatile uint32_t uvc_runtime_flush_on_iso_enable;
+extern volatile uint32_t uvc_runtime_no_frame_gap_enable;
+extern volatile uint32_t uvc_runtime_idle_header_only_enable;
+extern volatile uint32_t uvc_runtime_idle_packet_mode;
+extern volatile uint32_t uvc_runtime_idle_gap_skips;
+extern volatile uint32_t uvc_runtime_idle_iso_skips;
+extern volatile uint32_t uvc_runtime_idle_zlp_packets;
 
 extern volatile uint32_t uvc_class_iso_incomplete_calls;
 extern volatile uint32_t uvc_class_iso_incomplete_retry_ok;

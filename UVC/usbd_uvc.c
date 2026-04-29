@@ -53,6 +53,13 @@
 #define UVC_PACKET_INDEX_PREBUILT  0x8000U
 #define UVC_PACKET_INDEX_MASK      0x7FFFU
 #define UVC_PREPACKET_MAX_PACKETS  40U
+#define UVC_FLUSH_POLICY_NONE      0U
+#define UVC_FLUSH_POLICY_EVERY_TX  1U
+#define UVC_FLUSH_POLICY_RECOVERY  2U
+#define UVC_FLUSH_REASON_BEFORE_TX 1U
+#define UVC_FLUSH_REASON_ALT       2U
+#define UVC_FLUSH_REASON_ISO       3U
+#define UVC_FLUSH_REASON_BUSY      4U
 
 typedef struct __attribute__((packed))
 {
@@ -174,6 +181,7 @@ static void UVC_RuntimeDropCurrentFrame(void);
 static void UVC_RuntimeFinishFrame(void);
 static uint8_t UVC_PrimeNextPacket(USBD_HandleTypeDef *pdev) UVC_FAST_CODE;
 static void UVC_CleanTxBuffer(uint8_t *packet, uint16_t packet_size) UVC_FAST_CODE;
+static USBD_StatusTypeDef UVC_FlushStreamEP(USBD_HandleTypeDef *pdev, uint32_t reason);
 static uint16_t UVC_GetPacketSize(USBD_SpeedTypeDef speed);
 static uint16_t UVC_GetPayloadTransferSize(USBD_SpeedTypeDef speed);
 static uint8_t UVC_PreparePrepackets(const uint8_t *frame_ptr, uint32_t frame_size, uint16_t packet_size);
@@ -258,8 +266,17 @@ static uint8_t current_alt_setting = 0U;
 static USBD_UVC_ItfTypeDef *uvc_fops = &uvc_default_itf;
 
 volatile uvc_runtime_diag_t uvc_runtime_dbg = {0};
+volatile uvc_runtime_watch_t uvc_watch = {0};
 volatile uint32_t uvc_runtime_busy_timeout_ms = 2U;
-volatile uint32_t uvc_runtime_flush_before_tx_enable = 1U;
+volatile uint32_t uvc_runtime_flush_before_tx_enable = 0U;
+volatile uint32_t uvc_runtime_flush_policy = UVC_FLUSH_POLICY_RECOVERY;
+volatile uint32_t uvc_runtime_flush_on_iso_enable = 1U;
+volatile uint32_t uvc_runtime_no_frame_gap_enable = 0U;
+volatile uint32_t uvc_runtime_idle_header_only_enable = 0U;
+volatile uint32_t uvc_runtime_idle_packet_mode = UVC_IDLE_PACKET_ZLP;
+volatile uint32_t uvc_runtime_idle_gap_skips = 0U;
+volatile uint32_t uvc_runtime_idle_iso_skips = 0U;
+volatile uint32_t uvc_runtime_idle_zlp_packets = 0U;
 
 volatile uint32_t uvc_ll_tx_calls = 0;
 volatile uint32_t uvc_ll_tx_ok = 0;
@@ -892,6 +909,35 @@ static void UVC_RuntimePublish(void)
     uvc_runtime_dbg.last_offset = uvc_runtime_state.offset;
     uvc_runtime_dbg.last_frame_size = uvc_runtime_state.frame_size;
     uvc_runtime_dbg.next_frame_tick = uvc_runtime_state.next_frame_tick;
+
+    uvc_watch.streaming_enabled = uvc_runtime_dbg.streaming_enabled;
+    uvc_watch.ep_busy = uvc_runtime_dbg.ep_busy;
+    uvc_watch.current_alt_setting = uvc_runtime_dbg.current_alt_setting;
+    uvc_watch.huvc_state = uvc_runtime_dbg.huvc_state;
+    uvc_watch.frame_active = uvc_runtime_dbg.frame_active;
+    uvc_watch.fid = uvc_runtime_dbg.fid;
+    uvc_watch.cnt_eof = uvc_runtime_dbg.cnt_eof;
+    uvc_watch.cnt_data_in = uvc_runtime_dbg.cnt_data_in;
+    uvc_watch.cnt_iso_in_incomplete = uvc_runtime_dbg.cnt_iso_in_incomplete;
+    uvc_watch.cnt_underrun = uvc_runtime_dbg.cnt_underrun;
+    uvc_watch.cnt_dropped_frames = uvc_runtime_dbg.cnt_dropped_frames;
+    uvc_watch.cnt_frame_load = uvc_runtime_dbg.cnt_frame_load;
+    uvc_watch.cnt_payload = uvc_runtime_dbg.cnt_payload;
+    uvc_watch.cnt_header_only = uvc_runtime_dbg.cnt_header_only;
+    uvc_watch.cnt_idle_gap_skip = uvc_runtime_idle_gap_skips;
+    uvc_watch.cnt_idle_iso_skip = uvc_runtime_idle_iso_skips;
+    uvc_watch.cnt_idle_zlp = uvc_runtime_idle_zlp_packets;
+    uvc_watch.cnt_flush_recovery = uvc_runtime_dbg.cnt_flush_recovery;
+    uvc_watch.cnt_flush_while_epena = uvc_runtime_dbg.cnt_flush_while_epena;
+    uvc_watch.last_prime_reason = uvc_runtime_dbg.last_prime_reason;
+    uvc_watch.last_len = uvc_runtime_dbg.last_len;
+    uvc_watch.last_header = uvc_runtime_dbg.last_header;
+    uvc_watch.last_offset = uvc_runtime_dbg.last_offset;
+    uvc_watch.last_frame_size = uvc_runtime_dbg.last_frame_size;
+    uvc_watch.next_frame_tick = uvc_runtime_dbg.next_frame_tick;
+    uvc_watch.last_submit_tick = uvc_runtime_dbg.last_submit_tick;
+    uvc_watch.last_complete_tick = uvc_runtime_dbg.last_complete_tick;
+    uvc_watch.frame_interval_ms = uvc_frame_interval_ms;
 }
 
 static void UVC_RuntimeReset(uint8_t streaming_enabled)
@@ -996,7 +1042,8 @@ static void UVC_RuntimeFinishFrame(void)
     uvc_runtime_state.frame_size = 0U;
     uvc_runtime_state.offset = 0U;
 
-    if (uvc_frame_interval_ms != 0U)
+    if ((uvc_runtime_no_frame_gap_enable == 0U) &&
+        (uvc_frame_interval_ms != 0U))
     {
         uvc_runtime_state.next_frame_tick = HAL_GetTick() + uvc_frame_interval_ms;
     }
@@ -1138,6 +1185,67 @@ static void UVC_FAST_CODE UVC_CleanTxBuffer(uint8_t *packet, uint16_t packet_siz
 #endif
 }
 
+static USBD_StatusTypeDef UVC_FlushStreamEP(USBD_HandleTypeDef *pdev, uint32_t reason)
+{
+    USBD_StatusTypeDef flush_status;
+    uint32_t before_diepctl = 0U;
+    uint32_t before_dieptsiz = 0U;
+    uint32_t before_diepint = 0U;
+    uint32_t after_diepctl = 0U;
+    uint32_t after_dieptsiz = 0U;
+    uint32_t after_diepint = 0U;
+
+    if (pdev == NULL)
+    {
+        uvc_runtime_dbg.last_flush_status = (uint32_t)USBD_FAIL;
+        uvc_runtime_dbg.last_flush_reason = reason;
+        return USBD_FAIL;
+    }
+
+    UVC_SnapshotInEpRegs((uint8_t)(UVC_IN_EP & 0x7FU),
+                         &before_diepctl,
+                         &before_dieptsiz,
+                         &before_diepint);
+    uvc_runtime_dbg.flush_before_diepctl = before_diepctl;
+    uvc_runtime_dbg.flush_before_dieptsiz = before_dieptsiz;
+    uvc_runtime_dbg.flush_before_diepint = before_diepint;
+    uvc_runtime_dbg.last_flush_reason = reason;
+
+    if ((before_diepctl & USB_OTG_DIEPCTL_EPENA) != 0U)
+    {
+        uvc_runtime_dbg.cnt_flush_while_epena++;
+    }
+
+    flush_status = USBD_LL_FlushEP(pdev, UVC_IN_EP);
+    uvc_runtime_dbg.last_flush_status = (uint32_t)flush_status;
+
+    UVC_SnapshotInEpRegs((uint8_t)(UVC_IN_EP & 0x7FU),
+                         &after_diepctl,
+                         &after_dieptsiz,
+                         &after_diepint);
+    uvc_runtime_dbg.flush_after_diepctl = after_diepctl;
+    uvc_runtime_dbg.flush_after_dieptsiz = after_dieptsiz;
+    uvc_runtime_dbg.flush_after_diepint = after_diepint;
+
+    if (flush_status == USBD_OK)
+    {
+        if (reason == UVC_FLUSH_REASON_BEFORE_TX)
+        {
+            uvc_runtime_dbg.cnt_flush_before_tx++;
+        }
+        else
+        {
+            uvc_runtime_dbg.cnt_flush_recovery++;
+        }
+    }
+    else
+    {
+        uvc_runtime_dbg.cnt_flush_before_tx_fail++;
+    }
+
+    return flush_status;
+}
+
 static uint8_t UVC_FAST_CODE UVC_PrimeNextPacket(USBD_HandleTypeDef *pdev)
 {
     usbd_uvc_handle_t *huvc = UVC_GetHandle(pdev);
@@ -1223,18 +1331,47 @@ static uint8_t UVC_FAST_CODE UVC_PrimeNextPacket(USBD_HandleTypeDef *pdev)
         sending_payload = 1U;
         new_offset = offset + chunk;
     }
+    else if (uvc_runtime_state.next_frame_tick != 0U)
+    {
+        if ((uvc_runtime_idle_packet_mode == UVC_IDLE_PACKET_SKIP) ||
+            ((uvc_runtime_idle_packet_mode == UVC_IDLE_PACKET_HEADER) &&
+             (uvc_runtime_idle_header_only_enable == 0U)))
+        {
+            uvc_runtime_idle_gap_skips++;
+            uvc_min_no_tx_wait_pending++;
+            uvc_dbg_wait_frame_interval = 1U;
+            uvc_runtime_dbg.last_prime_reason = UVC_PRIME_REASON_IDLE_GAP;
+            UVC_RuntimePublish();
+            return (uint8_t)USBD_OK;
+        }
+
+        if (uvc_runtime_idle_packet_mode == UVC_IDLE_PACKET_ZLP)
+        {
+            tx_len = 0U;
+            uvc_runtime_idle_zlp_packets++;
+            uvc_runtime_dbg.last_prime_reason = UVC_PRIME_REASON_IDLE_ZLP;
+        }
+        else
+        {
+            uvc_min_header_only_packets++;
+            uvc_stm_header_only_packets++;
+        }
+    }
     else
     {
         uvc_min_header_only_packets++;
         uvc_stm_header_only_packets++;
     }
 
-    uvc_runtime_tx_packet[0] = UVC_HEADER_SIZE;
-    uvc_runtime_tx_packet[1] = header;
-    uvc_payload_header[0] = uvc_runtime_tx_packet[0];
-    uvc_payload_header[1] = header;
-    uvc_last_header_b0 = uvc_runtime_tx_packet[0];
-    uvc_last_header_b1 = header;
+    if (tx_len != 0U)
+    {
+        uvc_runtime_tx_packet[0] = UVC_HEADER_SIZE;
+        uvc_runtime_tx_packet[1] = header;
+        uvc_payload_header[0] = uvc_runtime_tx_packet[0];
+        uvc_payload_header[1] = header;
+        uvc_last_header_b0 = uvc_runtime_tx_packet[0];
+        uvc_last_header_b1 = header;
+    }
 
     uvc_ll_tx_calls++;
     uvc_ll_tx_last_epnum = (uint8_t)(UVC_IN_EP & 0x7FU);
@@ -1255,19 +1392,10 @@ static uint8_t UVC_FAST_CODE UVC_PrimeNextPacket(USBD_HandleTypeDef *pdev)
     uvc_runtime_dbg.last_offset = offset;
     uvc_runtime_dbg.last_frame_size = uvc_runtime_state.frame_size;
 
-    if (uvc_runtime_flush_before_tx_enable != 0U)
+    if ((uvc_runtime_flush_before_tx_enable != 0U) ||
+        (uvc_runtime_flush_policy == UVC_FLUSH_POLICY_EVERY_TX))
     {
-        USBD_StatusTypeDef flush_status = USBD_LL_FlushEP(pdev, UVC_IN_EP);
-
-        uvc_runtime_dbg.last_flush_status = (uint32_t)flush_status;
-        if (flush_status == USBD_OK)
-        {
-            uvc_runtime_dbg.cnt_flush_before_tx++;
-        }
-        else
-        {
-            uvc_runtime_dbg.cnt_flush_before_tx_fail++;
-        }
+        (void)UVC_FlushStreamEP(pdev, UVC_FLUSH_REASON_BEFORE_TX);
     }
 
     UVC_CleanTxBuffer(uvc_runtime_tx_packet, tx_len);
@@ -1313,6 +1441,11 @@ static uint8_t UVC_FAST_CODE UVC_PrimeNextPacket(USBD_HandleTypeDef *pdev)
         uvc_stm_last_packet_index = backend_state.packet_index;
         uvc_runtime_dbg.cnt_payload++;
         uvc_runtime_dbg.last_prime_reason = UVC_PRIME_REASON_PAYLOAD;
+    }
+    else if (tx_len == 0U)
+    {
+        uvc_runtime_state.last_packet_was_eof = 0U;
+        uvc_runtime_dbg.last_prime_reason = UVC_PRIME_REASON_IDLE_ZLP;
     }
     else
     {
@@ -3224,7 +3357,10 @@ static uint8_t USBD_UVC_Setup(USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *re
                     uvc_set_interface_alt1_calls++;
                     uvc_runtime_dbg.cnt_set_interface_alt1++;
                     uvc_pending_stream_start_dbg = 1U;
-                    (void)USBD_LL_FlushEP(pdev, UVC_IN_EP);
+                    if (uvc_runtime_flush_policy != UVC_FLUSH_POLICY_NONE)
+                    {
+                        (void)UVC_FlushStreamEP(pdev, UVC_FLUSH_REASON_ALT);
+                    }
                     if (UVC_GetItf(pdev) != NULL)
                     {
                         UVC_GetItf(pdev)->Start();
@@ -3245,7 +3381,10 @@ static uint8_t USBD_UVC_Setup(USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *re
                     {
                         UVC_GetItf(pdev)->Stop();
                     }
-                    (void)USBD_LL_FlushEP(pdev, UVC_IN_EP);
+                    if (uvc_runtime_flush_policy != UVC_FLUSH_POLICY_NONE)
+                    {
+                        (void)UVC_FlushStreamEP(pdev, UVC_FLUSH_REASON_ALT);
+                    }
                 }
                 return (uint8_t)USBD_OK;
             }
@@ -3347,7 +3486,10 @@ static uint8_t USBD_UVC_SOF(USBD_HandleTypeDef *pdev)
                                      &uvc_runtime_dbg.busy_dieptsiz,
                                      &uvc_runtime_dbg.busy_diepint);
 
-                (void)USBD_LL_FlushEP(pdev, UVC_IN_EP);
+                if (uvc_runtime_flush_policy != UVC_FLUSH_POLICY_NONE)
+                {
+                    (void)UVC_FlushStreamEP(pdev, UVC_FLUSH_REASON_BUSY);
+                }
                 uvc_runtime_state.ep_busy = 0U;
                 uvc_runtime_state.last_packet_was_eof = 0U;
                 uvc_tx_in_flight_dbg = 0U;
@@ -3425,6 +3567,8 @@ static uint8_t UVC_FAST_CODE USBD_UVC_DataIn(USBD_HandleTypeDef *pdev, uint8_t e
 static uint8_t USBD_UVC_IsoINIncomplete(USBD_HandleTypeDef *pdev, uint8_t epnum)
 {
     usbd_uvc_handle_t *huvc = UVC_GetHandle(pdev);
+    uint32_t now = HAL_GetTick();
+    uint8_t idle_gap = 0U;
 
     uvc_class_iso_incomplete_calls++;
     uvc_runtime_dbg.cnt_iso_in_incomplete++;
@@ -3437,13 +3581,20 @@ static uint8_t USBD_UVC_IsoINIncomplete(USBD_HandleTypeDef *pdev, uint8_t epnum)
 
     uvc_runtime_state.ep_busy = 0U;
     uvc_tx_in_flight_dbg = 0U;
-    uvc_iso_no_active_last_tick = HAL_GetTick();
+    uvc_iso_no_active_last_tick = now;
     uvc_iso_no_active_last_state = huvc->state;
     uvc_iso_no_active_last_next_frame_tick = uvc_runtime_state.next_frame_tick;
     UVC_SnapshotInEpRegs(epnum,
                          &uvc_iso_no_active_last_diepctl,
                          &uvc_iso_no_active_last_dieptsiz,
                          &uvc_iso_no_active_last_diepint);
+
+    if ((uvc_runtime_state.frame_active == 0U) &&
+        (uvc_runtime_state.next_frame_tick != 0U) &&
+        ((int32_t)(now - uvc_runtime_state.next_frame_tick) < 0))
+    {
+        idle_gap = 1U;
+    }
 
     if (uvc_runtime_state.frame_active != 0U)
     {
@@ -3454,7 +3605,21 @@ static uint8_t USBD_UVC_IsoINIncomplete(USBD_HandleTypeDef *pdev, uint8_t epnum)
     {
         uvc_class_iso_incomplete_no_active_frame++;
         uvc_runtime_state.last_packet_was_eof = 0U;
+        if (idle_gap != 0U)
+        {
+            uvc_runtime_idle_iso_skips++;
+            uvc_dbg_wait_frame_interval = 1U;
+            UVC_RuntimePublish();
+            return (uint8_t)USBD_OK;
+        }
+
         UVC_RuntimePublish();
+    }
+
+    if ((uvc_runtime_flush_policy == UVC_FLUSH_POLICY_RECOVERY) &&
+        (uvc_runtime_flush_on_iso_enable != 0U))
+    {
+        (void)UVC_FlushStreamEP(pdev, UVC_FLUSH_REASON_ISO);
     }
 
     if ((uvc_runtime_state.streaming_enabled != 0U) && (current_alt_setting == 1U))
