@@ -25,6 +25,7 @@
 #include "usbd_core.h"
 #include "uvc_stream.h"
 #include "usbd_uvc.h"
+#include "usb_stack_select.h"
 /* USER CODE BEGIN Includes */
 #include <string.h>
 
@@ -301,6 +302,7 @@ void HAL_PCD_MspDeInit(PCD_HandleTypeDef* pcdHandle)
   }
 }
 
+#if !UVC_USB_STACK_IS_USBX
 /**
   * @brief  Setup stage callback
   * @param  hpcd: PCD handle
@@ -647,6 +649,7 @@ void HAL_PCD_DisconnectCallback(PCD_HandleTypeDef *hpcd)
   usb_disconnect_cb_calls++;
   USBD_LL_DevDisconnected((USBD_HandleTypeDef*)hpcd->pData);
 }
+#endif /* !UVC_USB_STACK_IS_USBX */
 
 /*******************************************************************************
                        LL Driver Interface (USB Device Library --> PCD)

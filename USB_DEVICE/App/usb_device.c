@@ -21,10 +21,16 @@
 /* Includes ------------------------------------------------------------------*/
 
 #include "usb_device.h"
+#include "usb_stack_select.h"
+
+#if UVC_USB_STACK_IS_USBX
+#include "app_usbx_device.h"
+#else
 #include "usbd_core.h"
 #include "usbd_desc.h"
 
 #include "usbd_uvc.h"
+#endif
 
 /* USER CODE BEGIN Includes */
 
@@ -63,6 +69,9 @@ USBD_HandleTypeDef hUsbDeviceHS;
   */
 void MX_USB_DEVICE_Init(void)
 {
+#if UVC_USB_STACK_IS_USBX
+  (void)MX_USBX_Device_Init();
+#else
   /* USER CODE BEGIN USB_DEVICE_Init_PreTreatment */
 
   /* USER CODE END USB_DEVICE_Init_PreTreatment */
@@ -77,6 +86,7 @@ void MX_USB_DEVICE_Init(void)
   HAL_PWREx_EnableUSBVoltageDetector();
 
   /* USER CODE END USB_DEVICE_Init_PostTreatment */
+#endif
 }
 
 /**

@@ -34,6 +34,10 @@
 #include "camera_pipeline.h"
 #include "video_source.h"
 #include "uvc_stream.h"
+#include "usb_stack_select.h"
+#if UVC_USB_STACK_IS_USBX
+#include "app_usbx_device.h"
+#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -554,12 +558,16 @@ int main(void)
     	  {
     	      camera_pipeline_update();
     	  }
+#if UVC_USB_STACK_IS_USBX
+    	  MX_USBX_Device_Process();
+#else
     	  uvc_stream_watchdog_poll();
     	  if (uvc_stream_needs_sof_poll())
     	  {
     	      uvc_process_from_main_poll_calls++;
     	      uvc_stream_poll_pending();
     	  }
+#endif
 //    	  if (uvc_stream_is_active())
 //    	      {
 //    	          uvc_stream_process();

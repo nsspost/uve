@@ -21,6 +21,8 @@ pinout_table_filin2*.html
 # Local Codex/debug backups and downloaded STM reference copy
 .codex_backup_*/
 .stm_webcam_ref/
+.usbx_ref/
+.headless_ws/
 
 # IDE/user-local noise
 .metadata/
