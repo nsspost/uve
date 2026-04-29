@@ -4,6 +4,51 @@
 
 Цель файла: вести живой список проверенных гипотез, чтобы не ходить кругами. После каждого изменения прошивки и проверки pcap обновляем факты, вывод и статус гипотез.
 
+## 2026-04-29: USBX standalone, поток замирает через несколько секунд
+
+Свежий `UVC.pcapng` после перехода на USBX standalone:
+
+- Устройство в захвате: USB address `13`, VID/PID `0483:5750`.
+- Ненулевые UVC ISO IN payload на EP `0x81` идут только примерно с `6 s` по `11 s`.
+- По секундам для `usb.device_address == 13`, `ep81`, device-to-host:
+  - `6 s`: `12` ненулевых packet completion, `29097` байт;
+  - `7 s`: `16`, `49805` байт;
+  - `8 s`: `14`, `42285` байт;
+  - `9 s`: `14`, `45138` байт;
+  - `10 s`: `16`, `51695` байт;
+  - `11 s`: `13`, `30123` байт;
+  - `12..16 s`: ненулевых payload `0`, дальше идут только пустые/ошибочные ISO completion.
+- После деградации хост получает ISO URB с нулевой длиной и `XACT/ISOCH_REQUEST_FAILED`, затем пытается abort/reset pipe и увести streaming interface в `alt=0`.
+
+Вывод:
+
+- Это не похоже на первичную порчу JPEG: до срыва данные реально идут, после срыва payload вообще перестает попадать на шину.
+- В USBX standalone найден риск высыхания очереди: `USBD_VIDEO_StreamPayloadDone()` пополнял очередь только при `length != 0`, а USBX write task при пустой очереди может начать гонять zero-length transfer. После первого zero-length completion приложение уже не ставило новый payload.
+- Второй риск: STM-пример `video_write_payload()` использовал `ux_utility_delay_ms()` между кадрами. В standalone это busy-wait внутри USBX processing path, то есть на время задержки сама USBX state machine не обслуживается.
+
+Изменение для следующей проверки:
+
+- `StreamPayloadDone` теперь пополняет очередь и после `length == 0`, если stream не остановлен.
+- На `SET_INTERFACE alt=1` очередь payload предварительно заполняется до `ux_device_class_video_transmission_start()`.
+- Блокирующая `ux_utility_delay_ms()` убрана из `video_write_payload()`. Пауза между кадрами заменена на неблокирующие header-only packets до следующего `next_frame_tick`.
+- Добавлены debug counters `usbx_video_*`: смотреть прежде всего `usbx_video_payload_zero_dbg`, `usbx_video_payload_get_fail_dbg`, `usbx_video_payload_commit_fail_dbg`, `usbx_video_start_status_dbg`, `usbx_video_idle_header_dbg`, `usbx_video_frame_start_dbg`, `usbx_video_frame_done_dbg`.
+
+HAL обновлять сейчас не первая гипотеза: pcap указывает на starvation payload queue на уровне USBX video app. HAL/USBX DCD стоит трогать отдельной веткой только если после этой правки очередь не высыхает, но ISO transfer все равно умирает ниже класса.
+
+Результат проверки:
+
+- После USBX queue/prefill/no-delay правки поток все равно повис после первого кадра.
+- Значит, это изменение не считается решением и код USBX video app возвращен к состоянию `f98cf06`.
+- Свежий pcap после отката: устройство `24`, EP `0x81`; есть несколько payload в `1..2 s`, затем с `2.448 s` начинаются `USBD_STATUS_ISOCH_REQUEST_FAILED / XACT_ERROR`, дальше поток пустой. Симптом по сути тот же.
+
+Следующий эксперимент:
+
+- Сделать USB HAL/LL строго как в STM webcam reference. Сравнение показало, что заголовки, `stm32h7xx_hal_pcd_ex.c` и USB HAL уже совпадали; отличались только наши `#pragma GCC optimize("O2")` в:
+  - `Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_pcd.c`;
+  - `Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_ll_usb.c`.
+- Эти два файла заменены копиями из `.stm_webcam_ref`, теперь USB HAL/LL побайтно совпадает с STM reference для PCD/LL USB.
+- Цель проверки: понять, не вносил ли `O2` на USB низком уровне ошибку timing/state machine.
+
 ## Текущие факты
 
 - Устройство перечисляется как `0483:5750`.
@@ -1994,3 +2039,159 @@ Counters:
 - Сохранить текущее состояние отдельным git checkpoint.
 - Не продолжать латать idle-gap в classic stack без новой сильной гипотезы.
 - Следующий чистый эксперимент - отдельная ветка с USBX `Ux_Device_Video` / ST USBX middleware, чтобы сравнить поведение на другом официальном ST stack.
+
+## 2026-04-29 22:49: свежий CubeH7 слой поверх текущего USBX-эксперимента
+
+После проверки USBX поведение потока осталось тем же: настоящее видео появляется, но через несколько секунд или после первого кадра поток останавливается. Это снижает вероятность, что причина только в нашем старом `usbd_uvc.c`.
+
+Что сделано:
+
+- Временным sparse-клоном взят официальный `STM32CubeH7` tag `v1.13.0` из GitHub ST.
+- Обновлены существующие файлы `Drivers/STM32H7xx_HAL_Driver`, `Drivers/CMSIS` и `Middlewares/ST/STM32_USB_Device_Library/Core`.
+- HAL поднят до `__STM32H7xx_HAL_VERSION = 1.11.6`.
+- Добавлены новые CMSIS headers, которые требуются свежему `core_cm7.h`: `cachel1_armv7.h` и сопутствующие новые include-файлы.
+- USBX middleware не менялся: локальные файлы `USBX/Middlewares/ST/usbx` уже совпадали с официальным `stm32-usbx-examples` `Release v1.0.0`, USBX `6.2.1`.
+- Для совместимости classic UVC class со свежим `STM32_USB_Device_Library` исправлен доступ к `pdev->pUserData`: теперь используется `pdev->pUserData[pdev->classId]`, потому что в новом core это массив.
+
+Сборка:
+
+- `BaseH743/Debug` собирается успешно после обновления Cube: `0 errors`.
+- Остались только старые предупреждения в `ili9488.c`, не связанные с USB.
+
+Что проверяет следующий запуск:
+
+- Если поведение не изменится и на свежем HAL/CMSIS/USB Device Core, то причина с высокой вероятностью не в устаревшем Cube-слое проекта.
+- Тогда следующий фокус: низкоуровневая конфигурация OTG HS/ULPI/FIFO/interrupt priority/clocking и то, как USBX DCD получает/обрабатывает `XACT_ERROR` после isoch IN underrun.
+- В свежем pcap особенно смотреть момент первого перехода от полезных EP81 payload к нулевым/ошибочным ISO descriptors: изменился ли тип/момент ошибки после HAL `1.11.6`.
+
+## 2026-04-29 22:59: после CubeH7 v1.13.0 устройство определяется, но payload не стартует
+
+Свежий pcap после обновления HAL/CMSIS/USB Device Core:
+
+- Устройство `0483:5750`, USB address `28`.
+- Enumeration проходит, конфигурационный дескриптор отдается.
+- Windows делает UVC negotiation:
+  - `GET_CUR/SET_CUR` probe;
+  - `GET_MIN/GET_MAX`;
+  - `SET_CUR` commit;
+  - затем `SET_INTERFACE alt=1` на streaming interface `1`.
+- После `SET_INTERFACE alt=1` хост запускает ISO IN URB на EP `0x81`.
+- Устройство отдает ровно один 2-байтный payload: `02 00`.
+- После этого в pcap идут пустые ISO URB: `Packet Data Length = 0`, явного `XACT_ERROR` на этом этапе нет.
+
+Вывод:
+
+- Это уже не прежняя проблема битых кадров. Сейчас после старта stream в USBX не ставится следующий payload.
+- Вероятный механизм: `ux_device_class_video_write_task_function()` завершает первый IN transfer, но `transfer_request_actual_length` приходит как `0` или callback вызывается с нулевой длиной. Наш `USBD_VIDEO_StreamPayloadDone()` был почти дословно из STM example и ставил следующий payload только при `length != 0`.
+- Для IN video stream это условие слишком хрупкое: если completion пришел с `actual_length = 0`, application перестает пополнять USBX payload queue, хотя host продолжает polling.
+
+Изменение для следующего теста:
+
+- `USBD_VIDEO_StreamPayloadDone()` теперь при любом completion, пока stream не остановлен, переводит состояние в `STREAMING` и вызывает `video_write_payload()`.
+- Добавлены debugger-visible counters:
+  - `usbx_video_payload_done_last_len_dbg`;
+  - `usbx_video_payload_done_zero_dbg`;
+  - `usbx_video_write_payload_calls_dbg`;
+  - `usbx_video_write_payload_get_status_dbg`;
+  - `usbx_video_write_payload_commit_status_dbg`;
+  - `usbx_video_write_payload_last_len_dbg`.
+- `video_write_payload()` теперь сохраняет статусы `ux_device_class_video_write_payload_get()` и `ux_device_class_video_write_payload_commit()`.
+
+Что проверять:
+
+- Если гипотеза верна, после первого `02 00` в pcap должны появиться пакеты `512`/остатки с JPEG payload.
+- В отладчике `usbx_video_payload_done_zero_dbg` может расти, это нормально для этой проверки.
+- Критичные поля при отсутствии стрима: `usbx_video_write_payload_get_status_dbg`, `usbx_video_write_payload_commit_status_dbg`, `usbx_video_write_payload_last_len_dbg`.
+
+## 2026-04-29 23:05: USBX abort-path был скомпилирован как no-op
+
+Проверка вопроса про функцию abort после обновления HAL/Cube:
+
+- В текущей USBX/ST DCD функция `_ux_dcd_stm32_transfer_abort()` уже есть:
+  `USBX/Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_transfer_abort.c`.
+- Она попадает в линковку: в `Debug/BaseH743.map` есть `_ux_dcd_stm32_transfer_abort`.
+- HAL `1.11.6` содержит `HAL_PCD_EP_Abort()`.
+- Но в `USBX/Target/ux_stm32_config.h` оставался `USBD_HAL_TRANSFER_ABORT_NOT_SUPPORTED`.
+  Из-за него тело `_ux_dcd_stm32_transfer_abort()` вырезалось препроцессором, и USBX abort фактически только возвращал `UX_SUCCESS`, не вызывая `HAL_PCD_EP_Abort()` и `HAL_PCD_EP_Flush()`.
+
+Изменение для следующего теста:
+
+- Убран `USBD_HAL_TRANSFER_ABORT_NOT_SUPPORTED`.
+- Теперь при `UX_DCD_TRANSFER_ABORT` USBX DCD должен реально делать `HAL_PCD_EP_Abort()` и `HAL_PCD_EP_Flush()` для endpoint.
+
+Что проверять:
+
+- Изменится ли поведение при остановке stream/alt setting/reset pipe.
+- Если stream зависнет снова, сравнить pcap: исчезнут ли длинные серии пустых/ошибочных ISO URB после попыток host abort/reset.
+- Если станет хуже на старте enumeration, вернуть define и считать этот abort-path несовместимым с текущей standalone-схемой.
+
+Результат первого запуска с реальным abort-path:
+
+- Устройство `0483:5750`, USB address `39`, перечисление проходит.
+- Host делает `SET_INTERFACE alt=1` на interface `1` в `t=1.818 s`.
+- После этого на EP `0x81` пришел только один UVC header-only payload `02 00`.
+- Дальше ISO URB идут с `Packet Data Length = 0`, при этом в первом URB `USBD_STATUS_SUCCESS`, явного `XACT_ERROR` на старте нет.
+- В `t=5.024 s` host уводит streaming interface обратно в `alt=0`.
+
+Вывод:
+
+- Этот конкретный отказ не похож на порчу JPEG и не похож на recovery после XACT error: полезный JPEG payload вообще не начал попадать на шину.
+- Правка real abort не объясняет стартовый fail: на `alt=1` abort еще не является главным событием. Она остается важной для `alt=0/reset pipe/recovery`, но не должна быть единственным изменением в следующем чистом тесте.
+- Чтобы не смешивать низкоуровневую находку с очередными попытками лечить протокол, USBX video app возвращен к STM-like поведению: `StreamPayloadDone()` снова ставит следующий payload только при `length != 0`, дополнительные `payload_done_zero/write_payload_*` counters убраны.
+
+Следующий тест:
+
+- Проверить сборку с единственным существенным USBX-изменением: реальный `_ux_dcd_stm32_transfer_abort()` включен, протокольный callback снова STM-like.
+- Если снова будет ровно один `02 00`, следующий фокус - не UVC header/FID/JPEG, а почему USBX standalone write task не получает/не обрабатывает completion первого IN transfer или не продвигает payload ring.
+
+## 2026-04-29 23:21: откат к последнему состоянию, где USBX-видео появлялось
+
+После запуска без stream стало ясно, что в дереве остался слишком большой экспериментальный слой после момента, где настоящее видео уже появлялось:
+
+- обновленный `Drivers/CMSIS`;
+- обновленный `Drivers/STM32H7xx_HAL_Driver`;
+- обновленный classic `Middlewares/ST/STM32_USB_Device_Library/Core`;
+- совместимость `UVC/usbd_uvc.c` с новым `pUserData[pdev->classId]`;
+- включение реального USBX DCD abort через удаление `USBD_HAL_TRANSFER_ABORT_NOT_SUPPORTED`.
+
+Откат:
+
+- `Drivers/CMSIS`, `Drivers/STM32H7xx_HAL_Driver`, `Middlewares/ST/STM32_USB_Device_Library/Core`, `UVC/usbd_uvc.c`, `USBX/Target/ux_stm32_config.h` возвращены к `f98cf06`.
+- Удалены новые untracked CMSIS headers, пришедшие вместе со свежим Cube.
+- `USBD_HAL_TRANSFER_ABORT_NOT_SUPPORTED` снова включен, то есть этот тест возвращает и старый no-op abort-path.
+- Не тронуты `BaseH743 Debug.launch` и этот файл гипотез.
+
+Сборка:
+
+- `BaseH743/Debug` после отката собирается: `0 errors`, прежние `11 warnings` в `ili9488.c`.
+
+Что проверяет следующий запуск:
+
+- Если видео снова появится, значит срыв старта был внесен свежим Cube/HAL/Core или real-abort экспериментом, а не оставшейся логикой UVC payload.
+- Если видео все равно не появится, значит отличие находится не в этих слоях, и надо смотреть pcap + debugger counters текущей сборки относительно `f98cf06`.
+
+Результат:
+
+- Видео вернулось.
+- Значит, отсутствие stream было внесено одним из слоев, откатанных в этом шаге:
+  - свежий `Drivers/CMSIS`;
+  - свежий `Drivers/STM32H7xx_HAL_Driver`;
+  - свежий classic `STM32_USB_Device_Library/Core`;
+  - совместимость `UVC/usbd_uvc.c` под новый `pUserData[pdev->classId]`;
+  - включение real USBX abort-path.
+
+Уточнение по real abort:
+
+- В рабочем старом HAL нет `HAL_PCD_EP_Abort()`, есть только `HAL_PCD_EP_Flush()`.
+- Поэтому включить real USBX abort одним удалением `USBD_HAL_TRANSFER_ABORT_NOT_SUPPORTED` на текущей рабочей базе нельзя: сборка потребует добавить `HAL_PCD_EP_Abort()` из свежего HAL или сделать совместимость.
+- Следовательно, пока не считаем real abort доказанной причиной или решением. Он остается отдельной гипотезой, которую надо проверять только изолированно.
+
+Следующий безопасный порядок:
+
+1. Сохранить рабочее состояние как checkpoint.
+2. Проверять свежий Cube-слой не пачкой, а частями:
+   - сначала только `USBX/Target/ux_stm32_config.h` без real abort не трогать;
+   - затем отдельно classic USB Device Core, если он вообще нужен для USBX-сборки;
+   - затем отдельно HAL PCD/LL USB;
+   - затем CMSIS только если HAL требует новые headers.
+3. Для real abort сделать отдельный маленький эксперимент: либо принести только `HAL_PCD_EP_Abort()`/prototype, либо заменить только минимальные PCD файлы, и сразу смотреть, стартует ли видео.
