@@ -19,6 +19,18 @@ extern volatile ULONG usbx_device_state_dbg;
 extern volatile ULONG usbx_device_speed_dbg;
 extern volatile ULONG usbx_video_stream_change_dbg;
 extern volatile ULONG usbx_video_payload_done_dbg;
+extern volatile ULONG usbx_gintmsk_after_start_dbg;
+extern volatile ULONG usbx_gintsts_after_start_dbg;
+extern volatile ULONG usbx_gintmsk_after_iisoixfr_mask_dbg;
+extern volatile ULONG usbx_video_last_alt_dbg;
+extern volatile ULONG usbx_video_start_status_dbg;
+extern volatile ULONG usbx_video_write_calls_dbg;
+extern volatile ULONG usbx_video_get_status_dbg;
+extern volatile ULONG usbx_video_commit_status_dbg;
+extern volatile ULONG usbx_video_last_done_len_dbg;
+extern volatile ULONG usbx_video_last_payload_len_dbg;
+extern volatile ULONG usbx_video_last_buffer_len_dbg;
+extern volatile ULONG usbx_video_last_state_dbg;
 
 #ifdef __cplusplus
 }

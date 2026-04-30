@@ -1,13 +1,12 @@
-/**************************************************************************/
-/*                                                                        */
-/*       Copyright (c) Microsoft Corporation. All rights reserved.        */
-/*                                                                        */
-/*       This software is licensed under the Microsoft Software License   */
-/*       Terms for Microsoft Azure RTOS. Full text of the license can be  */
-/*       found in the LICENSE file at https://aka.ms/AzureRTOS_EULA       */
-/*       and in the root directory of this software.                      */
-/*                                                                        */
-/**************************************************************************/
+/***************************************************************************
+ * Copyright (c) 2024 Microsoft Corporation 
+ * 
+ * This program and the accompanying materials are made available under the
+ * terms of the MIT License which is available at
+ * https://opensource.org/licenses/MIT.
+ * 
+ * SPDX-License-Identifier: MIT
+ **************************************************************************/
 
 
 /**************************************************************************/
@@ -30,6 +29,15 @@
 #include "ux_dcd_stm32.h"
 #include "ux_device_stack.h"
 #include "ux_utility.h"
+
+volatile ULONG usbx_dcd_data_in_calls_dbg = 0UL;
+volatile ULONG usbx_dcd_data_in_ep_dbg = 0UL;
+volatile ULONG usbx_dcd_data_in_req_len_dbg = 0UL;
+volatile ULONG usbx_dcd_iso_incomplete_calls_dbg = 0UL;
+volatile ULONG usbx_dcd_iso_incomplete_ep_dbg = 0UL;
+volatile ULONG usbx_dcd_iso_incomplete_retry_calls_dbg = 0UL;
+volatile ULONG usbx_dcd_iso_incomplete_retry_status_dbg = 0UL;
+volatile ULONG usbx_dcd_iso_incomplete_retry_len_dbg = 0UL;
 
 
 static inline void _ux_dcd_stm32_setup_in(UX_DCD_STM32_ED * ed, UX_SLAVE_TRANSFER *transfer_request)
@@ -401,6 +409,9 @@ ULONG                   transfer_length;
 UX_SLAVE_ENDPOINT       *endpoint;
 
 
+    usbx_dcd_data_in_calls_dbg++;
+    usbx_dcd_data_in_ep_dbg = epnum;
+
     /* Get the pointer to the DCD.  */
     dcd =  &_ux_system_slave -> ux_system_slave_dcd;
 
@@ -417,6 +428,7 @@ UX_SLAVE_ENDPOINT       *endpoint;
 
     /* Get the pointer to the transfer request.  */
     transfer_request =  &(ed -> ux_dcd_stm32_ed_endpoint -> ux_slave_endpoint_transfer_request);
+    usbx_dcd_data_in_req_len_dbg = transfer_request -> ux_slave_transfer_request_requested_length;
 
     /* Endpoint 0 is different.  */
     if (epnum == 0U)
@@ -1091,8 +1103,11 @@ UX_SLAVE_DCD            *dcd;
 UX_DCD_STM32            *dcd_stm32;
 UX_DCD_STM32_ED         *ed;
 UX_SLAVE_ENDPOINT       *endpoint;
+HAL_StatusTypeDef       hal_status;
 
     UX_PARAMETER_NOT_USED(epnum);
+    usbx_dcd_iso_incomplete_calls_dbg++;
+    usbx_dcd_iso_incomplete_ep_dbg = epnum;
 
     /* Get the pointer to the DCD.  */
     dcd =  &_ux_system_slave -> ux_system_slave_dcd;
@@ -1116,10 +1131,14 @@ UX_SLAVE_ENDPOINT       *endpoint;
     {
 
         /* Incomplete, discard data and retry.  */
-        HAL_PCD_EP_Transmit(dcd_stm32 -> pcd_handle,
-                        endpoint->ux_slave_endpoint_descriptor.bEndpointAddress,
-                        endpoint->ux_slave_endpoint_transfer_request.ux_slave_transfer_request_data_pointer,
-                        endpoint->ux_slave_endpoint_transfer_request.ux_slave_transfer_request_requested_length);
+        usbx_dcd_iso_incomplete_retry_calls_dbg++;
+        usbx_dcd_iso_incomplete_retry_len_dbg =
+            endpoint->ux_slave_endpoint_transfer_request.ux_slave_transfer_request_requested_length;
+        hal_status = HAL_PCD_EP_Transmit(dcd_stm32 -> pcd_handle,
+                                         endpoint->ux_slave_endpoint_descriptor.bEndpointAddress,
+                                         endpoint->ux_slave_endpoint_transfer_request.ux_slave_transfer_request_data_pointer,
+                                         endpoint->ux_slave_endpoint_transfer_request.ux_slave_transfer_request_requested_length);
+        usbx_dcd_iso_incomplete_retry_status_dbg = (ULONG)hal_status;
     }
 }
 

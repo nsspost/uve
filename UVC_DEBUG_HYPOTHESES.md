@@ -1,8 +1,43 @@
 # Гипотезы по отладке UVC
 
-Обновлено: 2026-04-29. Последний разобранный `UVC.pcapng`: устройство `1/47`, захват от 2026-04-29 `06:59:23`.
+Обновлено: 2026-04-30. Последний разобранный `UVC.pcapng`: устройство `1/26`, захват от 2026-04-30 `18:24:06`.
 
 Цель файла: вести живой список проверенных гипотез, чтобы не ходить кругами. После каждого изменения прошивки и проверки pcap обновляем факты, вывод и статус гипотез.
+
+## 2026-04-30: USBX + обновленный HAL, изображения нет
+
+Свежий `UVC.pcapng` после обновления HAL/USBX:
+
+- Устройство перечисляется и проходит `PROBE/COMMIT`.
+- `SET_INTERFACE alt=1`: frame `2945`, время `1.537739 s`.
+- Хост ставит ISO IN URB на endpoint `0x81`.
+- Все completion от устройства на `0x81` имеют `Packet Data Length = 0`.
+- Внутри URB `128` ISO descriptors, у каждого `ISO Data length = 0`, `USBD_STATUS_SUCCESS`.
+- Ошибок уровня pcap в этих ISO URB нет, но полезных видеоданных на шине тоже нет.
+
+Отладочные регистры в момент теста:
+
+- USBX/DCD вызывает `HAL_PCD_EP_Transmit(0x81, ..., 512)`.
+- Первые слова буфера корректные: `0xD8FF0102`, `0x1000E0FF`, то есть bytes `02 01 FF D8 FF E0 00 10`.
+- HAL PCD видит endpoint как ISO IN, `maxpacket = 512`, `xfer_len = 512`.
+- Значит, текущая проблема не в JPEG и не в формировании UVC payload: корректный первый MJPEG packet доходит до HAL.
+
+Новая гипотеза:
+
+- Сбой находится ниже USBX video class, в HAL/LL OTG HS ISO IN scheduling/FIFO.
+- Подозрительная разница в HAL non-DMA ISO IN ветке: parity bit `SODDFRM/SD0PID_SEVNFRM` ставился после `EPENA`, тогда как в DMA ветке HAL parity ставится до включения endpoint. Если бит кадра выставлен слишком поздно, endpoint стабильно промахивается по ISO window, и хост видит пустые successful ISO URB.
+
+Изменение для проверки:
+
+- Убран устаревший `USBD_HAL_TRANSFER_ABORT_NOT_SUPPORTED`: в обновленном HAL есть `HAL_PCD_EP_Abort()`, USBX должен иметь возможность реально abort/reset endpoint.
+- В `USB_EPStartXfer()` для non-DMA ISO IN порядок изменен на: program `DIEPTSIZ`, выбрать `SODDFRM/SEVNFRM`, затем `CNAK|EPENA`, затем запись FIFO.
+- Добавлена диагностика `usb_ll_iso_*` и `usb_ll_writepacket_*`, чтобы увидеть:
+  - `usb_ll_iso_dieptsiz_after_program_dbg`;
+  - `usb_ll_iso_diepctl_after_parity_dbg`;
+  - `usb_ll_iso_diepctl_after_enable_dbg`;
+  - `usb_ll_iso_dtxfsts_before_write_dbg / after_write_dbg`;
+  - `usb_ll_iso_dieptsiz_before_write_dbg / after_write_dbg`;
+  - `usb_ll_writepacket_first_word_dbg`.
 
 ## 2026-04-29: USBX standalone, поток замирает через несколько секунд
 
@@ -2195,3 +2230,450 @@ Counters:
    - затем отдельно HAL PCD/LL USB;
    - затем CMSIS только если HAL требует новые headers.
 3. Для real abort сделать отдельный маленький эксперимент: либо принести только `HAL_PCD_EP_Abort()`/prototype, либо заменить только минимальные PCD файлы, и сразу смотреть, стартует ли видео.
+
+## 2026-04-29 23:25: isolated USBX abort flush-only на рабочем HAL
+
+Гипотеза:
+
+- Возможно, для восстановления после `alt=0`/host reset pipe/abort достаточно не полного свежего `HAL_PCD_EP_Abort()`, а очистки endpoint FIFO.
+- Это близко к наблюдению из статьи iliasam: перед записью/после сбоя помогает очистка FIFO нужной конечной точки.
+
+Изменение:
+
+- На рабочей базе `f98cf06` не обновляем HAL/CMSIS/Core.
+- В `USBX/Target/ux_stm32_config.h` вместо `USBD_HAL_TRANSFER_ABORT_NOT_SUPPORTED` включен `USBD_HAL_TRANSFER_ABORT_FLUSH_ONLY`.
+- В `_ux_dcd_stm32_transfer_abort()` добавлен режим, где DCD abort вызывает только `HAL_PCD_EP_Flush()` и не требует отсутствующей в старом HAL `HAL_PCD_EP_Abort()`.
+
+Что проверять:
+
+- Главное: стартует ли видео так же, как до изменения.
+- Если стартует, проверить поведение при остановке/закрытии приложения/повторном открытии камеры и при зависании stream.
+- Если видео опять не стартует или исчезает, flush-only abort сам ломает рабочее состояние и его надо убрать.
+
+Результат:
+
+- Видео стартует, значит flush-only abort не ломает рабочую USBX-сборку.
+- Потом stream останавливается так же, как раньше. Значит одна только очистка FIFO в `_ux_dcd_stm32_transfer_abort()` не является лечением текущего зависания.
+- Следующий фокус - не менять протокол, а снять внутреннее состояние USBX video write task в момент остановки.
+
+## 2026-04-29 23:40: диагностика внутреннего состояния USBX video/DCD
+
+Цель:
+
+- Понять, где именно замирает поток после визуальной остановки: producer/ring buffer, USBX video write task, endpoint transfer request или DCD abort/flush.
+- Не менять payload, FID, descriptors, FPS и JPEG path в этом шаге.
+
+Добавлены debugger-visible переменные:
+
+- `usbx_video_stream_ptr_dbg`
+- `usbx_video_endpoint_ptr_dbg`
+- `usbx_video_task_state_dbg`
+- `usbx_video_task_status_dbg`
+- `usbx_video_buffer_error_count_dbg`
+- `usbx_video_transfer_len_dbg`
+- `usbx_video_access_len_dbg`
+- `usbx_video_transfer_status_dbg`
+- `usbx_video_transfer_completion_dbg`
+- `usbx_video_transfer_actual_len_dbg`
+- `usbx_video_transfer_requested_len_dbg`
+- `usbx_dcd_abort_calls_dbg`
+- `usbx_dcd_abort_ep_dbg`
+- `usbx_dcd_abort_flush_status_dbg`
+
+Как читать:
+
+- Если `usbx_task_calls_dbg` растет, а `usbx_video_task_state_dbg` стоит в reset/exit с ошибкой в `usbx_video_task_status_dbg`, проблема внутри USBX write task/transfer completion.
+- Если `usbx_video_buffer_error_count_dbg` растет, USBX видит рассинхрон своего payload ring: либо producer не успевает, либо access/transfer позиции сталкиваются.
+- Если `usbx_video_transfer_status_dbg` остается pending, а `usbx_video_transfer_completion_dbg` не меняется, зависание ближе к endpoint/DCD interrupt completion.
+- Если `usbx_video_transfer_len_dbg == 0`, а `usbx_video_access_len_dbg` содержит payload, надо смотреть продвижение transfer_pos/access_pos.
+- Если `usbx_dcd_abort_calls_dbg` растет в момент закрытия/перезапуска камеры, смотреть `usbx_dcd_abort_ep_dbg` и `usbx_dcd_abort_flush_status_dbg`.
+
+Сборка:
+
+- `BaseH743/Debug`: `0 errors`.
+
+Результат первого скрина после зависания:
+
+- `usbx_video_task_state_dbg = 34` (`RW_WAIT`).
+- `usbx_video_transfer_status_dbg = 1` (`PENDING`).
+- `usbx_video_transfer_len_dbg = 512`, `requested_len = 512`, `actual_len = 0`.
+- `usbx_video_task_status_dbg = 0`: USBX class не увидел ошибку верхнего уровня.
+- `usbx_dcd_abort_calls_dbg = 0`: host/class abort path не участвовал.
+- Вывод: UVC class не остановлен и не занят producer/JPEG. Зависание ниже - pending IN transfer на EP1 не получает completion/recovery.
+
+Найдено важное совпадение с прежней classic UVC победой:
+
+- В старом HAL обработчик `GINTSTS_IISOIXFR` вызывает `HAL_PCD_ISOINIncompleteCallback(hpcd, 0)`, то есть передает `epnum = 0` для global incomplete ISO IN event.
+- USBX DCD callback использовал этот `epnum` как индекс endpoint и поэтому пытался recovery не для EP `0x81`, а фактически для EP0.
+- Это объясняет зависший `PENDING` transfer: EP1 после incomplete event не переармировался корректно.
+
+Изменение:
+
+- В `USBX/Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_callback.c` добавлен remap/find активного ISO IN endpoint при `epnum == 0`.
+- `HAL_PCD_ISOINIncompleteCallback()` теперь повторяет pending transfer именно на найденном ISO IN endpoint, ожидаемо `0x81`.
+- Добавлены counters:
+  - `usbx_dcd_data_in_calls_dbg`
+  - `usbx_dcd_data_in_ep_dbg`
+  - `usbx_dcd_iso_incomplete_calls_dbg`
+  - `usbx_dcd_iso_incomplete_hal_ep_dbg`
+  - `usbx_dcd_iso_incomplete_mapped_ep_dbg`
+  - `usbx_dcd_iso_incomplete_retry_dbg`
+  - `usbx_dcd_iso_incomplete_retry_status_dbg`
+  - `usbx_dcd_iso_incomplete_no_ep_dbg`
+
+Что проверить:
+
+- При следующем зависании/долгом прогоне `usbx_dcd_iso_incomplete_hal_ep_dbg` может быть `0`, но `usbx_dcd_iso_incomplete_mapped_ep_dbg` должен стать `0x81` (`129`).
+- `usbx_dcd_iso_incomplete_retry_dbg` должен расти вместе с incomplete events.
+- Если stream теперь не зависает, корень был тем же классом ошибки, что и в classic UVC: неверная привязка global `IISOIXFR` к EP0.
+- Если зависнет снова, следующий скрин должен показать, остался ли `transfer_status=1/PENDING` при уже правильном `mapped_ep=129`.
+
+Результат проверки immediate retry:
+
+- Stream не стартует.
+- В debugger:
+  - `usbx_video_task_state_dbg = 34` (`RW_WAIT`);
+  - `usbx_video_transfer_status_dbg = 1` (`PENDING`);
+  - `usbx_video_transfer_len_dbg = 512`, `actual_len = 0`;
+  - `usbx_dcd_iso_incomplete_hal_ep_dbg = 0`;
+  - `usbx_dcd_iso_incomplete_mapped_ep_dbg = 129` (`0x81`);
+  - `usbx_dcd_iso_incomplete_retry_dbg` растет, `retry_status = 0`.
+- В pcap для нашего устройства `0483:5750`, address `46`: полезного payload нет; EP `0x81` почти сразу уходит в `USBD_STATUS_ISOCH_REQUEST_FAILED (0xc0000b00)` и затем пачки `USBD_STATUS_CANCELED (0xc0010000)`.
+
+Вывод:
+
+- Remap EP0 -> EP1 правильный и реально срабатывает.
+- Но immediate `HAL_PCD_EP_Transmit()` из `HAL_PCD_ISOINIncompleteCallback()` поверх текущего pending transfer создает retry storm и не восстанавливает поток.
+
+Следующее изменение:
+
+- Убрать immediate retry из `IISOIXFR` callback.
+- Вместо этого помечать текущий USBX transfer как завершенный с `UX_TRANSFER_MISSED_FRAME`, `actual_length = requested_length` и ставить `UX_DCD_STM32_ED_STATUS_DONE`.
+- Идея: не долбить hardware endpoint из ISR, а вернуть standalone video write task из `RW_WAIT`, дать ему освободить потерянный payload и штатно поставить следующий.
+- Добавлен счетчик `usbx_dcd_iso_incomplete_done_dbg`.
+
+## 2026-04-30: тест без правок протокола, только обновление HAL/CMSIS
+
+Причина:
+
+- Одни и те же попытки recovery на classic USB Device Library и USBX дают похожую картину: иногда устройство не определяется, иногда поток стартует и зависает.
+- Это ослабляет гипотезу, что корень именно в UVC class/payload state machine.
+- Следующий чистый тест: вернуть USBX/UVC к последнему чекпоинту и менять только базовые библиотеки STM.
+
+Сделано:
+
+- USBX/UVC protocol recovery patches возвращены к чекпоинту, без новых изменений в механике передачи.
+- HAL/CMSIS обновлены из `STM32CubeH7 v1.13.0`.
+- HAL Driver: `STM32H7xx HAL v1.11.6`.
+- CMSIS Device H7: `V1.10.7`.
+- CMSIS Include обновлен; добавлены новые зависимые headers `cachel1_armv7.h`, `core_cm55.h`, `core_cm85.h`, `core_starmc1.h`, `pac_armv81.h`, `pmu_armv8.h`.
+
+Сборка:
+
+- `Debug/BaseH743.elf` собирается успешно.
+- Оставшиеся warnings относятся к `Core/Src/ili9488.c` и не связаны с USB/HAL update.
+
+Что проверяем на плате:
+
+- Определяется ли устройство хостом после полного power cycle.
+- Меняется ли частота `IsoINIncomplete` / зависаний относительно предыдущей USBX-сборки.
+- Если поведение не изменится, смотреть ниже UVC class: `stm32h7xx_hal_pcd.c`, `stm32h7xx_ll_usb.c`, настройки ULPI/PHY/FIFO/interrupt handling и аппаратные условия линии.
+
+## 2026-04-30: свежий pcap после HAL/CMSIS и обновление USBX middleware
+
+Наблюдение из pcap:
+
+- Устройство `0483:5750` успешно перечисляется, в последней записи получило address `54`.
+- Хост реально включает streaming interface: `SET_INTERFACE` виден примерно на `1.283 s`.
+- Поток не полностью отсутствует: первый ISO/UVC payload на EP `0x81` появляется примерно на `1.305 s`, первые байты `02 00`.
+- До срыва есть `26` ненулевых URB на EP `0x81`.
+- Перед остановкой появляются ISO errors внутри успешных URB: например `iso_error_count = 1`, затем `4`, последний полезный URB имеет `data_len = 480`, `iso_error_count = 16` и начинается уже с середины JPEG, не с чистого UVC header.
+- После этого EP `0x81` уходит в повторяющиеся `USBD_STATUS_ISOCH_REQUEST_FAILED (0xc0000b00)` и пачки `USBD_STATUS_CANCELED (0xc0010000)`.
+
+Вывод:
+
+- Это не похоже на ошибку descriptors/SET_INTERFACE и не похоже на полное отсутствие JPEG.
+- Хост поток включает и первые данные принимает.
+- Срыв происходит ниже UVC application layer: после ISO error DCD/HAL/USBX не возвращают устойчивое состояние endpoint/transfer.
+
+Сделано для чистого библиотечного теста:
+
+- USBX middleware обновлен из официального `STMicroelectronics/stm32-mw-usbx v6.4.300`.
+- Текущая версия USBX core: `6.4.3` (`USBX_MAJOR_VERSION=6`, `USBX_MINOR_VERSION=4`, `USBX_PATCH_VERSION=3`).
+- Обновлены слои:
+  - `USBX/Middlewares/ST/usbx/common/core`
+  - `USBX/Middlewares/ST/usbx/common/usbx_device_classes`
+  - `USBX/Middlewares/ST/usbx/common/usbx_stm32_device_controllers`
+  - `USBX/Middlewares/ST/usbx/ports/cortex_m7/gnu`
+- UVC descriptors/payload/protocol специально не менялись.
+- Для standalone-сборки добавлены совместимые utility-заглушки/прототипы, требуемые новым USBX: `_ux_utility_time_elapsed()` и прототипы interrupt/time helpers в `ux_user.h`.
+
+Сборка:
+
+- `Debug/BaseH743.elf` собирается успешно после обновления USBX.
+- Размер текущего образа: `text=199624`, `data=456`, `bss=491472`.
+
+Что проверить на плате:
+
+- Стартует ли stream с новым USBX/DCD при тех же descriptors и той же application-логике.
+- Если зависание повторится, сравнить pcap: остались ли те же `USBD_STATUS_ISOCH_REQUEST_FAILED`/`CANCELED` после первых payload.
+- Если картина не изменилась даже с новым HAL/CMSIS и новым USBX, следующая зона поиска уже не UVC state machine, а физика/настройка USB HS: ULPI PHY, clocking, FIFO sizing, interrupt latency/priority, PCD low-level endpoint state.
+
+## 2026-04-30: после USBX update stream не стартует, только один header-only packet
+
+Наблюдение из свежего pcap:
+
+- Устройство `0483:5750` перечисляется, address `13`.
+- UVC Probe/Commit проходят успешно.
+- Хост делает `SET_INTERFACE alt=1` на frame `2111`, время примерно `2.096 s`.
+- На EP `0x81` есть `516` URB, но ненулевой payload только один:
+  - frame `2147`, время `2.117 s`, `data_len = 2`, статус `USBD_STATUS_SUCCESS`.
+- После этого идут успешные нулевые ISO URB, без `USBD_STATUS_ISOCH_REQUEST_FAILED`, без `CANCELED`, без `iso_error_count`.
+
+Вывод:
+
+- Это новый режим отказа после USBX update: не прежний срыв после ISO errors.
+- `Abort`/`IsoINIncomplete` в этой записи не выглядит причиной, потому что ошибок ISO в pcap нет.
+- Похоже, приложение ставит первый 2-байтовый UVC header-only payload в состоянии `READY`, но после него не переходит к нормальным JPEG payload.
+- Возможная причина: новый/обновленный standalone USBX video path возвращает payload-done с нулевой длиной или иначе не запускает нашу ветку `if (length != 0U)`, поэтому `uvc_state` остается `READY`.
+- Дополнительная найденная слабость: `packet_index` был `static` внутри `video_write_payload()` и не сбрасывался при новом `alt=1`, поэтому новый stream мог начаться с середины JPEG.
+
+Изменение:
+
+- В `USBD_VIDEO_StreamChange(alt=1)` поток теперь стартует сразу как `UVC_PLAY_STATUS_STREAMING`, без header-only priming packet.
+- Перед `ux_device_class_video_transmission_start()` предварительно коммитятся два реальных payload, чтобы не зависеть от первого payload-done callback.
+- В `USBD_VIDEO_StreamPayloadDone()` следующий payload готовится даже если `length == 0`, пока stream не остановлен.
+- `video_packet_index` вынесен в состояние модуля и сбрасывается на `alt=0` и `alt=1`.
+- Добавлены компактные counters:
+  - `usbx_video_last_alt_dbg`
+  - `usbx_video_start_status_dbg`
+  - `usbx_video_write_calls_dbg`
+  - `usbx_video_get_status_dbg`
+  - `usbx_video_commit_status_dbg`
+  - `usbx_video_last_done_len_dbg`
+  - `usbx_video_last_payload_len_dbg`
+  - `usbx_video_last_buffer_len_dbg`
+  - `usbx_video_last_state_dbg`
+
+Сборка:
+
+- После USBX update выполнена чистая пересборка, чтобы исключить старые объектники middleware.
+- `Debug/BaseH743.elf` собирается успешно.
+- Размер: `text=199784`, `data=456`, `bss=491504`.
+
+Что проверить:
+
+- В pcap после `SET_INTERFACE alt=1` первый ненулевой payload должен быть уже около `512` байт, а не `2`.
+- В debugger:
+  - `usbx_video_last_alt_dbg = 1`;
+  - `usbx_video_start_status_dbg = 0`;
+  - `usbx_video_get_status_dbg = 0`;
+  - `usbx_video_commit_status_dbg = 0`;
+  - `usbx_video_last_payload_len_dbg` должен быть `512` или последний короткий payload кадра.
+- Если снова будет только один пакет, смотреть `usbx_video_payload_done_dbg` и `usbx_video_last_done_len_dbg`: это покажет, вызывает ли USBX callback после первого IN transfer.
+
+## 2026-04-30: payload 512 готов, но на шину не выходит
+
+Наблюдение:
+
+- Debugger после правки показывает:
+  - `usbx_video_start_status_dbg = 0`;
+  - `usbx_video_get_status_dbg = 0`;
+  - `usbx_video_commit_status_dbg = 0`;
+  - `usbx_video_last_payload_len_dbg = 512`.
+- Значит USBX application/video layer реально подготовил и закоммитил 512-байтовый payload.
+
+Свежий pcap:
+
+- Устройство `0483:5750` перечисляется, address `24`.
+- На `EP 0x81` найдено `2980` URB.
+- Ненулевых payload на `EP 0x81`: `0`.
+- Первые URB на `EP 0x81` после `alt=1` идут с `data_len = 0`.
+- Первый ISO warning/error внутри URB: frame `3359`, время `2.229 s`, `iso_error_count = 35`.
+- Первый явный bad status: frame `3385`, время `2.245 s`, `USBD_STATUS_ISOCH_REQUEST_FAILED (0xc0000b00)`, `iso_error_count = 128`.
+- Потом идут пачки `USBD_STATUS_CANCELED (0xc0010000)`.
+
+Вывод:
+
+- Ошибка уже не в генерации JPEG и не в `video_write_payload()`: 512 байт есть в USBX payload queue.
+- Ошибка находится ниже: USBX standalone write task / DCD transfer_run / HAL_PCD_EP_Transmit / PCD endpoint state.
+- Сейчас нужно понять, вызывается ли фактически `HAL_PCD_EP_Transmit(EP 0x81, ..., 512)`.
+
+Добавлена диагностика DCD:
+
+- В `_ux_dcd_stm32_transfer_run()`:
+  - `usbx_dcd_run_calls_dbg`
+  - `usbx_dcd_run_ep_dbg`
+  - `usbx_dcd_run_phase_dbg`
+  - `usbx_dcd_run_len_dbg`
+  - `usbx_dcd_run_ed_status_before_dbg`
+  - `usbx_dcd_run_ed_status_after_dbg`
+  - `usbx_dcd_run_wait_transfer_dbg`
+  - `usbx_dcd_run_done_seen_dbg`
+  - `usbx_dcd_run_tx_calls_dbg`
+  - `usbx_dcd_run_tx_status_dbg`
+- В `HAL_PCD_DataInStageCallback()`:
+  - `usbx_dcd_data_in_calls_dbg`
+  - `usbx_dcd_data_in_ep_dbg`
+  - `usbx_dcd_data_in_req_len_dbg`
+- В `HAL_PCD_ISOINIncompleteCallback()`:
+  - `usbx_dcd_iso_incomplete_calls_dbg`
+  - `usbx_dcd_iso_incomplete_ep_dbg`
+  - `usbx_dcd_iso_incomplete_retry_calls_dbg`
+  - `usbx_dcd_iso_incomplete_retry_status_dbg`
+  - `usbx_dcd_iso_incomplete_retry_len_dbg`
+
+Что проверить после прошивки:
+
+- Если `usbx_dcd_run_tx_calls_dbg == 0`: USBX video task не доходит до DCD transfer start, копать task scheduling/state.
+- Если `usbx_dcd_run_tx_calls_dbg > 0`, `usbx_dcd_run_tx_status_dbg == 0`, но `usbx_dcd_data_in_calls_dbg == 0`: HAL принял transmit, но IN completion не приходит; это PCD/HAL/PHY/ISO timing/state.
+- Если `usbx_dcd_run_tx_status_dbg != 0`: HAL сразу отвергает transmit; смотреть endpoint state/FIFO/PCD busy.
+- Если растет `usbx_dcd_iso_incomplete_calls_dbg` до первого `DataIn`: первый IN transfer промахивается по ISO frame, а immediate retry из callback снова может создавать retry storm.
+
+Сборка:
+
+- `Debug/BaseH743.elf` собирается успешно.
+- Размер: `text=200020`, `data=456`, `bss=491600`.
+
+## 2026-04-30: после обновления pcap показывает ISO IN без payload
+
+Наблюдение по свежему `C:\Users\Professional\Documents\UVC.pcapng`:
+
+- Устройство `0483:5750` перечисляется как USB address `27`.
+- Probe/Commit проходят, затем хост делает `SET_INTERFACE alt=1`:
+  - frame `2650`, время `1.544625 s`, `bAlternateSetting = 1`, `wInterface = 1`;
+  - ответ устройства frame `2652`.
+- Сразу после этого хост ставит серию `URB_ISOCHRONOUS in` на `EP 0x81`.
+- Первый завершенный ISO URB от устройства:
+  - frame `2679`, время `1.566397 s`;
+  - `Endpoint: 0x81 IN`;
+  - `Packet Data Length = 0`;
+  - `number of packets = 128`;
+  - `error count = 0`;
+  - все ISO packet entries имеют `ISO Data length = 0` и `USBD_STATUS_SUCCESS`.
+- При закрытии камеры хост делает `ABORT_PIPE`, `SYNC_RESET_PIPE_AND_CLEAR_STALL`, затем `SET_INTERFACE alt=0`:
+  - frames `8907..8911`, время около `5.086 s`.
+
+Вывод:
+
+- В этом pcap нет реального payload на `EP 0x81` вообще, но и нет ISO ошибок.
+- Это отличается от прежней картины с `USBD_STATUS_ISOCH_REQUEST_FAILED/CANCELED`.
+- С учетом debugger-значений `usbx_video_last_payload_len_dbg = 512`, `usbx_dcd_run_tx_calls_dbg > 0`, `usbx_dcd_data_in_calls_dbg > 0`, проблема сейчас ниже application/video queue:
+  - либо DCD/HAL реально программирует `EP1` на нулевую длину;
+  - либо данные есть в `HAL_PCD_EP_Transmit()`, но FIFO/endpoint не отдает их в ISO slots;
+  - либо callbacks, которые мы считаем `DataIn`, приходят не от `EP1`.
+
+Найденный забытый пункт после HAL update:
+
+- В `USBX/Target/ux_stm32_config.h` оставался `USBD_HAL_TRANSFER_ABORT_NOT_SUPPORTED`.
+- В обновленном HAL функция `HAL_PCD_EP_Abort()` уже есть, а в официальном USBX reference этого define нет.
+- Define удален, теперь `_ux_dcd_stm32_transfer_abort()` может выполнять официальный `HAL_PCD_EP_Abort()` + `HAL_PCD_EP_Flush()`.
+
+Добавлена диагностика вокруг `HAL_PCD_EP_Transmit()` в `_ux_dcd_stm32_transfer_run()`:
+
+- `usbx_dcd_run_data_ptr_dbg`
+- `usbx_dcd_run_first_word_dbg`
+- `usbx_dcd_run_second_word_dbg`
+- `usbx_dcd_pcd_epnum_dbg`
+- `usbx_dcd_pcd_xfer_len_dbg`
+- `usbx_dcd_pcd_xfer_count_dbg`
+- `usbx_dcd_pcd_maxpacket_dbg`
+- `usbx_dcd_pcd_type_dbg`
+- `usbx_dcd_pcd_dieptsiz_dbg`
+- `usbx_dcd_pcd_diepctl_dbg`
+- `usbx_dcd_pcd_dtxfsts_dbg`
+- `usbx_dcd_pcd_diepint_dbg`
+
+Как интерпретировать следующий запуск:
+
+- Если `usbx_dcd_run_ep_dbg = 0x81`, `usbx_dcd_run_len_dbg = 512`, `usbx_dcd_run_first_word_dbg` начинается с UVC header/JPEG данных, а `usbx_dcd_pcd_dieptsiz_dbg` содержит `XFRSIZ=512` и `PKTCNT=1`, значит USBX и HAL передают корректный payload, а проблема уже в ISO timing/FIFO/PCD low-level.
+- Если `usbx_dcd_run_len_dbg = 0` или `usbx_dcd_run_first_word_dbg = 0`, значит payload теряется между USBX video queue и DCD transfer.
+- Если `usbx_dcd_data_in_ep_dbg != 1`, значит текущие `DataIn` callbacks не подтверждают передачу video endpoint.
+- Если `usbx_dcd_pcd_type_dbg != 1`, endpoint открыт не как ISO.
+
+Сборка:
+
+- `make all -j8` через toolchain STM32CubeIDE 2.0.0 проходит успешно.
+- Размер: `text=200368`, `data=456`, `bss=491632`.
+## 2026-04-30: USBX-ветка не восстанавливала маску IISOIXFR
+
+Наблюдение по свежему снимку отладчика:
+
+- USBX реально запускает валидную ISO IN передачу на EP `0x81`:
+  - `usbx_dcd_run_ep_dbg = 129`;
+  - `usbx_dcd_run_len_dbg = 512`;
+  - первый word в FIFO `0xD8FF0102`, байты `02 01 FF D8`: это корректный 2-байтовый UVC header и начало JPEG.
+- HAL/LL программирует endpoint корректно:
+  - `DIEPTSIZ = 0x20080200`: `MULCNT=1`, `PKTCNT=1`, `XFRSIZ=512`;
+  - свободное место Tx FIFO падает с `768` до `640` words, то есть в FIFO записан ровно один 512-байтовый пакет.
+- Pcap при этом показывает ISO completions на EP `0x81` с нулевой длиной payload.
+- `usbx_dcd_iso_incomplete_calls_dbg` растет очень быстро, а нормальный EP1 `DataIn` не приходит.
+
+Вывод:
+
+- Это не указатель JPEG, не генерация UVC header и не порча очереди payload в USBX.
+- Пакет уже лежит в USB FIFO, после чего путь OTG/HAL по `IISOIXFR` абортит EP1 раньше, чем payload доходит до хоста.
+- В старой classic-library ветке у нас был helper для маскирования `IISOIXFR`, но новый USBX init path его не вызывал.
+
+Изменение:
+
+- `usb_mask_iisoixfr_enable` по умолчанию выставлен в `1`.
+- USBX теперь маскирует `USB_OTG_GINTMSK_IISOIXFRM` после `HAL_PCD_Init()` и после `HAL_PCD_Start()`.
+- Добавлена диагностика:
+  - `usbx_gintmsk_after_start_dbg`;
+  - `usbx_gintsts_after_start_dbg`;
+  - `usbx_gintmsk_after_iisoixfr_mask_dbg`.
+
+Что проверить после прошивки:
+
+- `usb_mask_iisoixfr_enable == 1`.
+- `usb_gintmsk_after_iisoixfr_mask` и `usbx_gintmsk_after_iisoixfr_mask_dbg` не должны содержать бит `0x00100000`.
+- `usbx_dcd_iso_incomplete_calls_dbg` не должен расти непрерывной лавиной.
+- Если начнет расти EP1 `DataIn`, а pcap покажет ненулевой payload на EP `0x81`, значит реальная причина срыва была в HAL abort по `IISOIXFR`.
+
+## 2026-04-30: контрольная точка - USBX UVC снова показывает видео
+
+Результат после маскирования `IISOIXFR` в USBX-ветке:
+
+- Картинка появилась на хосте.
+- Видео длилось несколько секунд, тестовый ролик успел прокрутиться примерно 2.5 раза.
+- Визуально это первый успешный USBX/HAL-update результат после серии нулевых ISO completions.
+
+Свежий pcap `C:\Users\Professional\Documents\UVC.pcapng`:
+
+- Файл обновлен `2026-04-30 18:47:08`, размер `8513332` bytes.
+- Устройство в этом захвате работает как USB address `28`.
+- `SET_INTERFACE alt=1`: frame `2515`, время `1.654497 s`.
+- Первый ненулевой ISO payload на EP `0x81`: frame `2549`, время `1.676466 s`, `data_len = 1536`.
+- Всего ISO URB на EP `0x81`: `4348`.
+- Ненулевых ISO URB на EP `0x81`: `90`.
+- Суммарно полезных bytes в этих URB: `269191`.
+- Максимальный payload в одном URB: `4565` bytes.
+- Последний ненулевой payload: frame `11617`, время `7.772477 s`, `data_len = 3480`.
+- Между первым и последним ненулевым payload прошло примерно `6.096 s`.
+- Плохих `urb_status` по device address `28` не найдено.
+- `usb.iso.error_count > 0` не найдено.
+- После frame `11617` хост продолжает получать ISO URB на EP `0x81`, но уже с `data_len = 0` и успешным статусом.
+- `SET_INTERFACE alt=0`/остановка хостом позже: frame `19397`, время `10.359504 s`.
+
+Вывод по этой контрольной точке:
+
+- Победная часть подтверждена: маскирование `IISOIXFR` убрало прежнюю ситуацию, когда HAL абортил EP1 до доставки payload.
+- Текущий срыв уже другой природы: USB не падает с ошибкой, а поток после нескольких секунд перестает получать ненулевые payload.
+- Наиболее вероятное направление дальше: producer/USBX video payload queue/standalone task state. Нужно понять, почему после последнего нормального payload `video_write_payload()` или USBX write task перестают подкармливать очередь, хотя endpoint и host URB остаются живыми.
+
+Следующие проверки:
+
+- Добавить компактную диагностику состояния `stream_write`:
+  - `ux_device_class_video_stream_task_state`;
+  - `ux_device_class_video_stream_task_status`;
+  - `ux_device_class_video_stream_buffer_error_count`;
+  - длина payload в `transfer_pos`;
+  - длина payload в `access_pos`;
+  - `usbx_video_get_status_dbg`;
+  - `usbx_video_commit_status_dbg`;
+  - `usbx_video_write_calls_dbg`;
+  - `usbx_video_payload_done_dbg`.
+- Убрать/пересмотреть `ux_utility_delay_ms(USBD_VIDEO_IMAGE_LAPS)` внутри `video_write_payload()`: сейчас pcap показывает ритм ненулевых payload в основном `80 ms`, что совпадает с этой задержкой. Лучше управлять FPS внешним таймером/producer state, а не блокировать USBX payload-done путь.
+- Если после остановки `get_status` или `commit_status` становится `UX_BUFFER_OVERFLOW`/`UX_ERROR`, чинить ownership кольцевых payload buffers.
+- Если task state уходит в stop/reset/error, чинить USBX video task state.

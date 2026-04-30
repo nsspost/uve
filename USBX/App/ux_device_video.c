@@ -53,6 +53,18 @@ UX_DEVICE_CLASS_VIDEO_STREAM *stream_write;
 
 UCHAR video_frame_buffer[1024];
 
+static uint8_t video_packet_index = 0U;
+
+volatile ULONG usbx_video_last_alt_dbg = 0UL;
+volatile ULONG usbx_video_start_status_dbg = 0UL;
+volatile ULONG usbx_video_write_calls_dbg = 0UL;
+volatile ULONG usbx_video_get_status_dbg = 0UL;
+volatile ULONG usbx_video_commit_status_dbg = 0UL;
+volatile ULONG usbx_video_last_done_len_dbg = 0UL;
+volatile ULONG usbx_video_last_payload_len_dbg = 0UL;
+volatile ULONG usbx_video_last_buffer_len_dbg = 0UL;
+volatile ULONG usbx_video_last_state_dbg = 0UL;
+
 /* Video Probe data structure */
 static USBD_VideoControlTypeDef video_Probe_Control =
 {
@@ -162,6 +174,7 @@ VOID USBD_VIDEO_StreamChange(UX_DEVICE_CLASS_VIDEO_STREAM *video_stream,
 {
   /* USER CODE BEGIN USBD_VIDEO_StreamChange */
   usbx_video_stream_change_dbg++;
+  usbx_video_last_alt_dbg = alternate_setting;
 
   /* Stop video payload loop back if stream closed */
   if (alternate_setting == 0U)
@@ -170,18 +183,21 @@ VOID USBD_VIDEO_StreamChange(UX_DEVICE_CLASS_VIDEO_STREAM *video_stream,
     uvc_state = UVC_PLAY_STATUS_STOP;
 
     img_count = 0U;
+    video_packet_index = 0U;
 
     return;
   }
 
-  /* Update State machine */
-  uvc_state = UVC_PLAY_STATUS_READY;
+  /* Start alt setting with real video payload, not a header-only priming packet. */
+  uvc_state = UVC_PLAY_STATUS_STREAMING;
+  video_packet_index = 0U;
 
-  /* Write buffers until achieve threadshold */
+  /* Prime a small queue before enabling the video write task. */
+  video_write_payload(video_stream);
   video_write_payload(video_stream);
 
   /* Start sending valid payloads in the Video class */
-  ux_device_class_video_transmission_start(video_stream);
+  usbx_video_start_status_dbg = ux_device_class_video_transmission_start(video_stream);
 
   /* USER CODE END USBD_VIDEO_StreamChange */
 
@@ -200,9 +216,9 @@ VOID USBD_VIDEO_StreamPayloadDone(UX_DEVICE_CLASS_VIDEO_STREAM *video_stream,
 {
   /* USER CODE BEGIN USBD_VIDEO_StreamPayloadDone */
   usbx_video_payload_done_dbg++;
+  usbx_video_last_done_len_dbg = length;
 
-  /* Check length is not NULL */
-  if (length != 0U)
+  if (uvc_state != UVC_PLAY_STATUS_STOP)
   {
     /* Update state machine */
     uvc_state = UVC_PLAY_STATUS_STREAMING;
@@ -378,19 +394,28 @@ ULONG USBD_VIDEO_StreamGetMaxPayloadBufferSize(VOID)
   */
 VOID video_write_payload(UX_DEVICE_CLASS_VIDEO_STREAM *stream)
 {
-  ULONG buffer_length;
-  UCHAR *buffer;
+  ULONG buffer_length = 0UL;
+  UCHAR *buffer = UX_NULL;
   ULONG usbd_video_ep_mps = stream->ux_device_class_video_stream_endpoint->ux_slave_endpoint_descriptor.wMaxPacketSize;
   static ULONG length;
-  static uint8_t packet_index = 0;
   const uint8_t *(*ImagePtr)= tImagesList;
   uint32_t packet_count = (tImagesSizes[img_count])/(( uint16_t)(usbd_video_ep_mps - 2));
   uint32_t packet_remainder =(tImagesSizes[img_count])%(( uint16_t)(usbd_video_ep_mps - 2));
   static uint8_t  payload_header[2] = {0x02U, 0x00U};
   static uint8_t *Pcktdata = video_frame_buffer;
+  UINT status;
+
+  usbx_video_write_calls_dbg++;
+  usbx_video_last_state_dbg = uvc_state;
 
   /* Get payload buffer */
-  ux_device_class_video_write_payload_get(stream, &buffer, &buffer_length);
+  status = ux_device_class_video_write_payload_get(stream, &buffer, &buffer_length);
+  usbx_video_get_status_dbg = status;
+  usbx_video_last_buffer_len_dbg = buffer_length;
+  if (status != UX_SUCCESS)
+  {
+    return;
+  }
 
   /* Check UVC state*/
   switch(uvc_state)
@@ -407,18 +432,18 @@ VOID video_write_payload(UX_DEVICE_CLASS_VIDEO_STREAM *stream)
       ux_utility_memory_set(video_frame_buffer, 0, usbd_video_ep_mps);
 
       /* Check if end of current image has been reached */
-      if (packet_index < packet_count)
+      if (video_packet_index < packet_count)
       {
         /* Set the current packet size */
         length = (uint16_t)usbd_video_ep_mps;
 
         /* Get the pointer to the next packet to be transmitted */
-        Pcktdata = (uint8_t*)(*(ImagePtr + img_count) + packet_index * ((uint16_t)(usbd_video_ep_mps - 2U)));
+        Pcktdata = (uint8_t*)(*(ImagePtr + img_count) + video_packet_index * ((uint16_t)(usbd_video_ep_mps - 2U)));
       }
-      else if(packet_index == packet_count)
+      else if(video_packet_index == packet_count)
       {
         /* Get the pointer to the next packet to be transmitted */
-        Pcktdata =(uint8_t*)(*(ImagePtr + img_count)+packet_index * ((uint16_t)(usbd_video_ep_mps - 2U)));
+        Pcktdata =(uint8_t*)(*(ImagePtr + img_count)+video_packet_index * ((uint16_t)(usbd_video_ep_mps - 2U)));
 
         /* Set the current packet size */
         length = (packet_remainder + 2);
@@ -432,7 +457,7 @@ VOID video_write_payload(UX_DEVICE_CLASS_VIDEO_STREAM *stream)
       if (length > 2U)
       {
         /* Check if this is the first packet in current image */
-        if(packet_index == 0U)
+        if(video_packet_index == 0U)
         {
           /* Set the packet start index */
           payload_header[1] ^= 0x01U;
@@ -444,10 +469,10 @@ VOID video_write_payload(UX_DEVICE_CLASS_VIDEO_STREAM *stream)
       }
 
       /* Increment the packet count and check if it reached the end of current image buffer */
-      if (packet_index++ >= (packet_count + 1))
+      if (video_packet_index++ >= (packet_count + 1))
       {
         /* Reset the packet count to zero */
-        packet_index = 0U;
+        video_packet_index = 0U;
 
         /* Move to the next image in the images table */
         img_count++;
@@ -473,10 +498,15 @@ VOID video_write_payload(UX_DEVICE_CLASS_VIDEO_STREAM *stream)
   video_frame_buffer[1] = payload_header[1];
 
   /* Copy video buffer in video frame buffer */
+  if (length > buffer_length)
+  {
+    length = buffer_length;
+  }
   ux_utility_memory_copy(buffer, video_frame_buffer, length);
+  usbx_video_last_payload_len_dbg = length;
 
   /* Commit payload buffer */
-  ux_device_class_video_write_payload_commit(stream, length);
+  usbx_video_commit_status_dbg = ux_device_class_video_write_payload_commit(stream, length);
 }
 
 /* USER CODE END 1 */

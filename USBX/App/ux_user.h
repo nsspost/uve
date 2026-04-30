@@ -14,4 +14,9 @@
 #define UX_DEVICE_CLASS_VIDEO_MAX_STREAMS        1U
 #define UX_DEVICE_CLASS_VIDEO_MAX_PAYLOAD_SIZE   512U
 
+unsigned long _ux_utility_interrupt_disable(void);
+void _ux_utility_interrupt_restore(unsigned long flags);
+unsigned long _ux_utility_time_get(void);
+unsigned long _ux_utility_time_elapsed(unsigned long start, unsigned long now);
+
 #endif /* UX_USER_H */

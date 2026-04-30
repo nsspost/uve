@@ -8,6 +8,9 @@
 #include "ux_dcd_stm32.h"
 
 extern PCD_HandleTypeDef hpcd_USB_OTG_HS;
+extern volatile uint32_t usb_gintmsk_before_iisoixfr_mask;
+extern volatile uint32_t usb_gintmsk_after_iisoixfr_mask;
+extern volatile uint32_t usb_mask_iisoixfr_enable;
 
 #define USBX_DEVICE_MEMORY_STACK_SIZE (64U * 1024U)
 
@@ -27,6 +30,9 @@ volatile ULONG usbx_device_state_dbg = 0UL;
 volatile ULONG usbx_device_speed_dbg = 0UL;
 volatile ULONG usbx_video_stream_change_dbg = 0UL;
 volatile ULONG usbx_video_payload_done_dbg = 0UL;
+volatile ULONG usbx_gintmsk_after_start_dbg = 0UL;
+volatile ULONG usbx_gintsts_after_start_dbg = 0UL;
+volatile ULONG usbx_gintmsk_after_iisoixfr_mask_dbg = 0UL;
 
 ALIGN_TYPE _ux_utility_interrupt_disable(void)
 {
@@ -46,6 +52,30 @@ void _ux_utility_interrupt_restore(ALIGN_TYPE flags)
 ULONG _ux_utility_time_get(void)
 {
     return (ULONG)HAL_GetTick();
+}
+
+ULONG _ux_utility_time_elapsed(ULONG start, ULONG now)
+{
+    return now - start;
+}
+
+static void USBX_MaskIISOIXFRIfEnabled(void)
+{
+    USB_OTG_GlobalTypeDef *USBx = hpcd_USB_OTG_HS.Instance;
+
+    if (USBx == UX_NULL)
+    {
+        return;
+    }
+
+    usb_gintmsk_before_iisoixfr_mask = USBx->GINTMSK;
+    if (usb_mask_iisoixfr_enable != 0U)
+    {
+        USBx->GINTMSK &= ~USB_OTG_GINTMSK_IISOIXFRM;
+        USBx->GINTSTS = USB_OTG_GINTSTS_IISOIXFR;
+    }
+    usb_gintmsk_after_iisoixfr_mask = USBx->GINTMSK;
+    usbx_gintmsk_after_iisoixfr_mask_dbg = USBx->GINTMSK;
 }
 
 static UINT USBX_PCD_Init(void)
@@ -69,6 +99,8 @@ static UINT USBX_PCD_Init(void)
     {
         return UX_ERROR;
     }
+
+    USBX_MaskIISOIXFRIfEnabled();
 
     HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_HS, 0x80);
     HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_HS, 0, 0x40);
@@ -187,6 +219,9 @@ UINT MX_USBX_Device_Init(void)
         usbx_init_status_dbg = UX_ERROR;
         return UX_ERROR;
     }
+    USBX_MaskIISOIXFRIfEnabled();
+    usbx_gintmsk_after_start_dbg = USB_OTG_HS->GINTMSK;
+    usbx_gintsts_after_start_dbg = USB_OTG_HS->GINTSTS;
 
     HAL_PWREx_EnableUSBVoltageDetector();
 

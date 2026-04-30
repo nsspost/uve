@@ -37,7 +37,6 @@ extern "C" {
 #define UX_DCD_STM32_MAX_ED                   9
 
 #define USBD_HAL_ISOINCOMPLETE_CALLBACK
-#define USBD_HAL_TRANSFER_ABORT_NOT_SUPPORTED
 
 /* USER CODE BEGIN Private defines */
 
