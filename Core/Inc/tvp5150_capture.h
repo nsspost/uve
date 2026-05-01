@@ -1,0 +1,160 @@
+#ifndef __TVP5150_CAPTURE_H__
+#define __TVP5150_CAPTURE_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "main.h"
+
+#define TVP5150_CAPTURE_WIDTH       720U
+#define TVP5150_CAPTURE_HEIGHT      576U
+#define TVP5150_CAPTURE_BPP         2U
+#define TVP5150_CAPTURE_FRAME_BYTES (TVP5150_CAPTURE_WIDTH * TVP5150_CAPTURE_HEIGHT * TVP5150_CAPTURE_BPP)
+#define TVP5150_CAPTURE_FRAME_WORDS (TVP5150_CAPTURE_FRAME_BYTES / 4U)
+
+extern volatile uint32_t tvp_capture_enable_dbg;
+extern volatile uint32_t tvp_capture_line_mdma_enable_dbg;
+extern volatile uint32_t tvp_capture_crop_test_enable_dbg;
+extern volatile uint32_t tvp_capture_continuous_test_enable_dbg;
+extern volatile uint32_t tvp_capture_allow_i2c1_conflict_dbg;
+extern volatile uint32_t tvp_capture_init_done_dbg;
+extern volatile uint32_t tvp_capture_start_status_dbg;
+extern volatile uint32_t tvp_capture_skip_reason_dbg;
+extern volatile uint32_t tvp_capture_frame_count_dbg;
+extern volatile uint32_t tvp_capture_restart_count_dbg;
+extern volatile uint32_t tvp_capture_error_count_dbg;
+extern volatile uint32_t tvp_capture_line_count_dbg;
+extern volatile uint32_t tvp_capture_vsync_count_dbg;
+extern volatile uint32_t tvp_capture_active_buf_dbg;
+extern volatile uint32_t tvp_capture_ready_buf_dbg;
+extern volatile uint32_t tvp_capture_frame_pending_dbg;
+extern volatile uint32_t tvp_capture_first_word0_dbg;
+extern volatile uint32_t tvp_capture_first_word1_dbg;
+extern volatile uint32_t tvp_capture_first_word2_dbg;
+extern volatile uint32_t tvp_capture_first_word3_dbg;
+extern volatile uint32_t tvp_capture_head_checksum_dbg;
+extern volatile uint32_t tvp_capture_dma_target_dbg;
+extern volatile uint32_t tvp_capture_dma_length_dbg;
+extern volatile uint32_t tvp_capture_dcmi_mode_dbg;
+extern volatile uint32_t tvp_capture_dma_segment_length_dbg;
+extern volatile uint32_t tvp_capture_dma_words_done_dbg;
+extern volatile uint32_t tvp_capture_live_sample_count_dbg;
+extern volatile uint32_t tvp_capture_crop_config_status_dbg;
+extern volatile uint32_t tvp_capture_crop_enable_status_dbg;
+extern volatile uint32_t tvp_capture_dcmi_cwstrtr_dbg;
+extern volatile uint32_t tvp_capture_dcmi_cwsizer_dbg;
+extern volatile uint32_t tvp_capture_dcmi_cr_dbg;
+extern volatile uint32_t tvp_capture_dcmi_sr_dbg;
+extern volatile uint32_t tvp_capture_dcmi_risr_dbg;
+extern volatile uint32_t tvp_capture_dcmi_misr_dbg;
+extern volatile uint32_t tvp_capture_dma_cr_dbg;
+extern volatile uint32_t tvp_capture_dma_fcr_dbg;
+extern volatile uint32_t tvp_capture_dma_ndtr_dbg;
+extern volatile uint32_t tvp_capture_dma_par_dbg;
+extern volatile uint32_t tvp_capture_dma_m0ar_dbg;
+extern volatile uint32_t tvp_capture_dma_m1ar_dbg;
+extern volatile uint32_t tvp_capture_dma_error_dbg;
+extern volatile uint32_t tvp_capture_dcmi_error_dbg;
+extern volatile uint32_t tvp_capture_xfer_size_dbg;
+extern volatile uint32_t tvp_capture_xfer_count_dbg;
+extern volatile uint32_t tvp_capture_xfer_transfer_number_dbg;
+extern volatile uint32_t tvp_capture_pbuff_ptr_dbg;
+extern volatile uint32_t tvp_capture_pin_sample_count_dbg;
+extern volatile uint32_t tvp_capture_pin_sample_tick_dbg;
+extern volatile uint32_t tvp_capture_pin_levels_dbg;
+extern volatile uint32_t tvp_capture_pclk_edges_dbg;
+extern volatile uint32_t tvp_capture_hsync_edges_dbg;
+extern volatile uint32_t tvp_capture_vsync_edges_dbg;
+extern volatile uint32_t tvp_capture_data_or_dbg;
+extern volatile uint32_t tvp_capture_data_and_dbg;
+extern volatile uint32_t tvp_capture_data_change_mask_dbg;
+extern volatile uint32_t tvp_capture_raw_width_dbg;
+extern volatile uint32_t tvp_capture_reinit_request_dbg;
+extern volatile uint32_t tvp_capture_hw_crop_enable_dbg;
+extern volatile uint32_t tvp_capture_hw_crop_src_x_dbg;
+extern volatile uint32_t tvp_capture_hw_crop_src_y_dbg;
+extern volatile uint32_t tvp_capture_hw_crop_width_dbg;
+extern volatile uint32_t tvp_capture_hw_crop_height_dbg;
+extern volatile uint32_t tvp_capture_dma_segment_lines_dbg;
+extern volatile uint32_t tvp_capture_dma_segment_bytes_dbg;
+extern volatile uint32_t tvp_capture_line_bytes_dbg;
+extern volatile uint32_t tvp_capture_line_words_dbg;
+extern volatile uint32_t tvp_capture_line_write_index_dbg;
+extern volatile uint32_t tvp_capture_dma_line0_count_dbg;
+extern volatile uint32_t tvp_capture_dma_line1_count_dbg;
+extern volatile uint32_t tvp_capture_last_frame_line_count_dbg;
+extern volatile uint32_t tvp_capture_min_frame_line_count_dbg;
+extern volatile uint32_t tvp_capture_max_frame_line_count_dbg;
+extern volatile uint32_t tvp_capture_short_frame_count_dbg;
+extern volatile uint32_t tvp_capture_short_frame_drop_enable_dbg;
+extern volatile uint32_t tvp_capture_short_frame_drop_count_dbg;
+extern volatile uint32_t tvp_capture_short_frame_last_lines_dbg;
+extern volatile uint32_t tvp_capture_mdma_init_status_dbg;
+extern volatile uint32_t tvp_capture_mdma_start_status_dbg;
+extern volatile uint32_t tvp_capture_mdma_complete_count_dbg;
+extern volatile uint32_t tvp_capture_mdma_busy_count_dbg;
+extern volatile uint32_t tvp_capture_mdma_error_count_dbg;
+extern volatile uint32_t tvp_capture_mdma_error_dbg;
+extern volatile uint32_t tvp_capture_mdma_cisr_dbg;
+extern volatile uint32_t tvp_capture_mdma_cesr_dbg;
+extern volatile uint32_t tvp_capture_mdma_ccr_dbg;
+extern volatile uint32_t tvp_capture_mdma_ctcr_dbg;
+extern volatile uint32_t tvp_capture_mdma_cbndtr_dbg;
+extern volatile uint32_t tvp_capture_mdma_csar_dbg;
+extern volatile uint32_t tvp_capture_mdma_cdar_dbg;
+extern volatile uint32_t tvp_capture_line_buf0_addr_dbg;
+extern volatile uint32_t tvp_capture_line_buf1_addr_dbg;
+extern volatile uint32_t tvp_capture_field_height_dbg;
+extern volatile uint32_t tvp_capture_vsync_resync_enable_dbg;
+extern volatile uint32_t tvp_capture_vsync_line_count_dbg;
+extern volatile uint32_t tvp_capture_vsync_resync_count_dbg;
+extern volatile uint32_t tvp_capture_vsync_drop_count_dbg;
+extern volatile uint32_t tvp_capture_line_overrun_count_dbg;
+extern volatile uint32_t tvp_capture_synthetic_frame_count_dbg;
+extern volatile uint32_t tvp_capture_field_sequence_dbg;
+extern volatile uint32_t tvp_capture_publish_field_div_dbg;
+extern volatile uint32_t tvp_capture_publish_field_phase_dbg;
+extern volatile uint32_t tvp_capture_field_publish_count_dbg;
+extern volatile uint32_t tvp_capture_field_phase_drop_count_dbg;
+extern volatile uint32_t tvp_capture_render_enable_dbg;
+extern volatile uint32_t tvp_capture_render_period_ms_dbg;
+extern volatile uint32_t tvp_capture_render_x_dbg;
+extern volatile uint32_t tvp_capture_render_y_dbg;
+extern volatile uint32_t tvp_capture_render_w_dbg;
+extern volatile uint32_t tvp_capture_render_h_dbg;
+extern volatile uint32_t tvp_capture_render_byte_order_dbg;
+extern volatile uint32_t tvp_capture_render_method_dbg;
+extern volatile uint32_t tvp_capture_render_src_x_dbg;
+extern volatile uint32_t tvp_capture_render_src_y_dbg;
+extern volatile uint32_t tvp_capture_render_dma2d_status_dbg;
+extern volatile uint32_t tvp_capture_render_dma2d_error_dbg;
+extern volatile uint32_t tvp_capture_render_dma2d_count_dbg;
+extern volatile uint32_t tvp_capture_render_linear_dma2d_enable_dbg;
+extern volatile uint32_t tvp_capture_render_fast_count_dbg;
+extern volatile uint32_t tvp_capture_render_fast_status_dbg;
+extern volatile uint32_t tvp_capture_render_fast_build_ms_dbg;
+extern volatile uint32_t tvp_capture_render_cpu_count_dbg;
+extern volatile uint32_t tvp_capture_render_count_dbg;
+extern volatile uint32_t tvp_capture_render_skip_period_dbg;
+extern volatile uint32_t tvp_capture_render_skip_no_target_dbg;
+extern volatile uint32_t tvp_capture_render_source_buf_dbg;
+extern volatile uint32_t tvp_capture_render_last_tick_dbg;
+extern volatile uint32_t tvp_capture_render_last_ms_dbg;
+extern volatile uint32_t tvp_capture_render_max_ms_dbg;
+extern volatile uint32_t tvp_capture_render_checksum_dbg;
+extern volatile uint32_t tvp_capture_render_locked_buf_dbg;
+extern volatile uint32_t tvp_capture_render_lock_drop_count_dbg;
+extern volatile uint32_t tvp_capture_ready_overwrite_count_dbg;
+
+extern MDMA_HandleTypeDef hmdma_tvp_capture;
+
+void TVP5150_Capture_Init(uint32_t tvp_i2c_bus);
+void TVP5150_Capture_Poll(void);
+void TVP5150_Capture_SetRGB565Target(uint16_t *target, uint32_t width, uint32_t height);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* __TVP5150_CAPTURE_H__ */

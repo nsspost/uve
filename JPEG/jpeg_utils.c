@@ -216,6 +216,21 @@ typedef struct __JPEG_MCU_RGB_ConvertorTypeDef
 * @}
 */
 
+#if (USE_JPEG_ENCODER == 1)
+static uint8_t JPEG_ClampToU8(int32_t value)
+{
+  if (value < 0)
+  {
+    return 0U;
+  }
+  if (value > 255)
+  {
+    return 255U;
+  }
+  return (uint8_t)value;
+}
+#endif
+
 /** @defgroup JPEG_Private_Variables JPEG Private Variables
 * @{
 */
@@ -484,9 +499,9 @@ static uint32_t JPEG_ARGB_MCU_YCbCr420_ConvertBlocks (uint8_t *pInBuffer,
         cbcomp = (int32_t)(*(RED_CB_LUT + red)) + (int32_t)(*(GREEN_CB_LUT + green)) + (int32_t)(*(BLUE_CB_RED_CR_LUT + blue)) + 128;
         crcomp = (int32_t)(*(BLUE_CB_RED_CR_LUT + red)) + (int32_t)(*(GREEN_CR_LUT + green)) + (int32_t)(*(BLUE_CR_LUT + blue)) + 128;
 
-        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset]))  = (ycomp);
-        (*(pOutAddr + JPEG_ConvertorParams.Cb_MCU_LUT[offset])) = (cbcomp);
-        (*(pOutAddr + JPEG_ConvertorParams.Cr_MCU_LUT[offset])) = (crcomp);
+        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset]))  = JPEG_ClampToU8(ycomp);
+        (*(pOutAddr + JPEG_ConvertorParams.Cb_MCU_LUT[offset])) = JPEG_ClampToU8(cbcomp);
+        (*(pOutAddr + JPEG_ConvertorParams.Cr_MCU_LUT[offset])) = JPEG_ClampToU8(crcomp);
 
         /* Second Pixel */
 #if (JPEG_RGB_FORMAT == JPEG_RGB565)
@@ -502,7 +517,7 @@ static uint32_t JPEG_ARGB_MCU_YCbCr420_ConvertBlocks (uint8_t *pInBuffer,
         blue  = (*(pInAddr + refline + JPEG_BYTES_PER_PIXEL + JPEG_BLUE_OFFSET/8)) ;
 #endif
         ycomp  = (int32_t)(*(RED_Y_LUT + red)) + (int32_t)(*(GREEN_Y_LUT + green)) + (int32_t)(*(BLUE_Y_LUT + blue));
-        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset + 1]))  = (ycomp);
+        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset + 1]))  = JPEG_ClampToU8(ycomp);
 
         /* Third Pixel */
 #if (JPEG_RGB_FORMAT == JPEG_RGB565)
@@ -519,7 +534,7 @@ static uint32_t JPEG_ARGB_MCU_YCbCr420_ConvertBlocks (uint8_t *pInBuffer,
 #endif
         ycomp  = (int32_t)(*(RED_Y_LUT + red)) + (int32_t)(*(GREEN_Y_LUT + green)) + (int32_t)(*(BLUE_Y_LUT + blue));
 
-        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset + JPEG_ConvertorParams.H_factor]))  = (ycomp);
+        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset + JPEG_ConvertorParams.H_factor]))  = JPEG_ClampToU8(ycomp);
 
         /* Fourth Pixel */
 #if (JPEG_RGB_FORMAT == JPEG_RGB565)
@@ -535,7 +550,7 @@ static uint32_t JPEG_ARGB_MCU_YCbCr420_ConvertBlocks (uint8_t *pInBuffer,
         blue  = (*(pInAddr + refline + JPEG_ConvertorParams.ScaledWidth + JPEG_BYTES_PER_PIXEL + JPEG_BLUE_OFFSET/8)) ;
 #endif
         ycomp  = (int32_t)(*(RED_Y_LUT + red)) + (int32_t)(*(GREEN_Y_LUT + green)) + (int32_t)(*(BLUE_Y_LUT + blue));
-        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset + JPEG_ConvertorParams.H_factor + 1]))  = (ycomp);
+        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset + JPEG_ConvertorParams.H_factor + 1]))  = JPEG_ClampToU8(ycomp);
 
         /****************/
 
@@ -628,9 +643,9 @@ static uint32_t JPEG_ARGB_MCU_YCbCr422_ConvertBlocks (uint8_t *pInBuffer,
         cbcomp = (int32_t)(*(RED_CB_LUT + red)) + (int32_t)(*(GREEN_CB_LUT + green)) + (int32_t)(*(BLUE_CB_RED_CR_LUT + blue)) + 128;
         crcomp = (int32_t)(*(BLUE_CB_RED_CR_LUT + red)) + (int32_t)(*(GREEN_CR_LUT + green)) + (int32_t)(*(BLUE_CR_LUT + blue)) + 128;
 
-        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset]))  = ycomp;
-        (*(pOutAddr + JPEG_ConvertorParams.Cb_MCU_LUT[offset])) = cbcomp;
-        (*(pOutAddr + JPEG_ConvertorParams.Cr_MCU_LUT[offset])) = crcomp;
+        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset]))  = JPEG_ClampToU8(ycomp);
+        (*(pOutAddr + JPEG_ConvertorParams.Cb_MCU_LUT[offset])) = JPEG_ClampToU8(cbcomp);
+        (*(pOutAddr + JPEG_ConvertorParams.Cr_MCU_LUT[offset])) = JPEG_ClampToU8(crcomp);
 
         /* Second Pixel */
 #if (JPEG_RGB_FORMAT == JPEG_RGB565)
@@ -646,7 +661,7 @@ static uint32_t JPEG_ARGB_MCU_YCbCr422_ConvertBlocks (uint8_t *pInBuffer,
         blue  = (*(pInAddr + refline + JPEG_BYTES_PER_PIXEL + JPEG_BLUE_OFFSET/8)) ;
 #endif
         ycomp  = (int32_t)(*(RED_Y_LUT + red)) + (int32_t)(*(GREEN_Y_LUT + green)) + (int32_t)(*(BLUE_Y_LUT + blue));
-        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset + 1]))  = ycomp;
+        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset + 1]))  = JPEG_ClampToU8(ycomp);
 
         /****************/
 
@@ -738,9 +753,9 @@ static uint32_t JPEG_ARGB_MCU_YCbCr444_ConvertBlocks (uint8_t *pInBuffer,
         cbcomp = (int32_t)(*(RED_CB_LUT + red)) + (int32_t)(*(GREEN_CB_LUT + green)) + (int32_t)(*(BLUE_CB_RED_CR_LUT + blue)) + 128;
         crcomp = (int32_t)(*(BLUE_CB_RED_CR_LUT + red)) + (int32_t)(*(GREEN_CR_LUT + green)) + (int32_t)(*(BLUE_CR_LUT + blue)) + 128;
 
-        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset]))  = (ycomp);
-        (*(pOutAddr + JPEG_ConvertorParams.Cb_MCU_LUT[offset])) = (cbcomp);
-        (*(pOutAddr + JPEG_ConvertorParams.Cr_MCU_LUT[offset])) = (crcomp);
+        (*(pOutAddr + JPEG_ConvertorParams.Y_MCU_LUT[offset]))  = JPEG_ClampToU8(ycomp);
+        (*(pOutAddr + JPEG_ConvertorParams.Cb_MCU_LUT[offset])) = JPEG_ClampToU8(cbcomp);
+        (*(pOutAddr + JPEG_ConvertorParams.Cr_MCU_LUT[offset])) = JPEG_ClampToU8(crcomp);
 
         pInAddr += JPEG_BYTES_PER_PIXEL;
         offset++;

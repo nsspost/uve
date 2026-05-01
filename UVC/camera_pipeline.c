@@ -6,6 +6,7 @@
 #include "stm32h7xx_hal.h"
 #include "jpeg_live.h"
 #include "test_jpeg.h"
+#include "tvp5150_capture.h"
 #include "usbd_uvc.h"
 #include "video_source.h"
 
@@ -71,6 +72,11 @@ volatile uint32_t camera_pipeline_last_submit_ok_tick = 0;
 volatile uint32_t camera_pipeline_last_submit_fail_tick = 0;
 volatile uint32_t camera_pipeline_last_oversize_jpeg_size = 0;
 volatile uint32_t camera_pipeline_last_oversize_tick = 0;
+volatile uint32_t camera_pipeline_use_tvp_render_rect_dbg = 1U;
+volatile uint32_t camera_pipeline_src_x_dbg = 0;
+volatile uint32_t camera_pipeline_src_y_dbg = 0;
+volatile uint32_t camera_pipeline_src_w_dbg = LCD_FB_W;
+volatile uint32_t camera_pipeline_src_h_dbg = LCD_FB_H;
 
 /* Frame sequence for fallback/test mode. */
 volatile uint32_t camera_pipeline_frame_id = 0;
@@ -79,19 +85,58 @@ volatile uint32_t camera_pipeline_frame_id = 0;
 
 static void uvc_frame_prepare_from_ltdc(void)
 {
-    /*
-     * Downsample LCD framebuffer to the UVC/JPEG frame size.
-     */
+    uint32_t src_x0 = 0U;
+    uint32_t src_y0 = 0U;
+    uint32_t src_w = LCD_FB_W;
+    uint32_t src_h = LCD_FB_H;
+
+    if (camera_pipeline_use_tvp_render_rect_dbg != 0U)
+    {
+        src_x0 = tvp_capture_render_x_dbg;
+        src_y0 = tvp_capture_render_y_dbg;
+        src_w = tvp_capture_render_w_dbg;
+        src_h = tvp_capture_render_h_dbg;
+    }
+
+    if (src_x0 >= LCD_FB_W)
+        src_x0 = 0U;
+    if (src_y0 >= LCD_FB_H)
+        src_y0 = 0U;
+
+    if (src_w == 0U || src_w > (LCD_FB_W - src_x0))
+        src_w = LCD_FB_W - src_x0;
+    if (src_h == 0U || src_h > (LCD_FB_H - src_y0))
+        src_h = LCD_FB_H - src_y0;
+
+    if (src_w == 0U || src_h == 0U)
+    {
+        src_x0 = 0U;
+        src_y0 = 0U;
+        src_w = LCD_FB_W;
+        src_h = LCD_FB_H;
+    }
+
+    camera_pipeline_src_x_dbg = src_x0;
+    camera_pipeline_src_y_dbg = src_y0;
+    camera_pipeline_src_w_dbg = src_w;
+    camera_pipeline_src_h_dbg = src_h;
+
     for (uint32_t y = 0; y < UVC_H; y++)
     {
-        uint32_t src_y = (y * LCD_FB_H) / UVC_H;
-        uint32_t src_row = src_y * LCD_FB_W;
+        uint32_t src_y_rel = (y * src_h) / UVC_H;
+        if (src_y_rel >= src_h)
+            src_y_rel = src_h - 1U;
+
+        uint32_t src_row = (src_y0 + src_y_rel) * LCD_FB_W;
         uint32_t dst_row = y * UVC_W;
 
         for (uint32_t x = 0; x < UVC_W; x++)
         {
-            uint32_t src_x = (x * LCD_FB_W) / UVC_W;
-            uint16_t px = fb[src_row + src_x];
+            uint32_t src_x_rel = (x * src_w) / UVC_W;
+            if (src_x_rel >= src_w)
+                src_x_rel = src_w - 1U;
+
+            uint16_t px = fb[src_row + src_x0 + src_x_rel];
 
             uvc_rgb565[dst_row + x] = px;
         }

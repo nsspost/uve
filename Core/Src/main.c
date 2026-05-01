@@ -22,6 +22,9 @@
 #include "ltdc.h"
 #include "mdma.h"
 #include "jpeg.h"
+#include "dcmi.h"
+#include "i2c.h"
+#include "tvp5150.h"
 #include "spi.h"
 #include "usb_device.h"
 #include "gpio.h"
@@ -32,6 +35,7 @@
 #include "BSP_SDRAM.h"
 #include "ili9488.h"
 #include "camera_pipeline.h"
+#include "tvp5150_capture.h"
 #include "video_source.h"
 #include "uvc_stream.h"
 #include "usb_stack_select.h"
@@ -78,6 +82,24 @@ volatile const uint8_t *main_first_jpeg_ptr_before_usb = 0;
 volatile uint32_t main_usb_only_loop_calls = 0;
 volatile uint32_t dma2d_last_rgb565_color = 0;
 volatile uint32_t dma2d_last_argb8888_color = 0;
+volatile uint32_t main_tvp_probe_bus_dbg = 0;
+volatile uint32_t main_tvp_i2c4_probe_ok_dbg = 0;
+volatile uint32_t main_tvp_i2c2_probe_ok_dbg = 0;
+volatile uint32_t main_tvp_i2c1_probe_ok_dbg = 0;
+volatile uint32_t main_tvp_i2c4_found_count_dbg = 0;
+volatile uint32_t main_tvp_i2c2_found_count_dbg = 0;
+volatile uint32_t main_tvp_i2c1_found_count_dbg = 0;
+volatile uint32_t main_tvp_i2c1_conflict_enable_dbg = 0;
+volatile uint32_t main_fb_addr_dbg = 0;
+volatile uint32_t main_ltdc_isr_dbg = 0;
+volatile uint32_t main_ltdc_ier_dbg = 0;
+volatile uint32_t main_ltdc_cdsr_dbg = 0;
+volatile uint32_t main_ltdc_layer0_cfbar_dbg = 0;
+volatile uint32_t main_ltdc_fu_count_dbg = 0;
+volatile uint32_t main_ltdc_te_count_dbg = 0;
+volatile uint32_t main_ltdc_sample_count_dbg = 0;
+volatile uint32_t main_tvp_to_fb_enable = 1;
+volatile uint32_t main_tvp_external_sync_enable_dbg = 1;
 
 HAL_StatusTypeDef dma2d_fill_screen(uint16_t color);
 HAL_StatusTypeDef dma2d_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color);
@@ -276,6 +298,57 @@ static void display_layer_init(void)
     display_draw_start_pattern();
 }
 
+static void display_sample_ltdc(void)
+{
+    uint32_t isr;
+
+    if (hltdc.Instance == NULL)
+    {
+        return;
+    }
+
+    main_fb_addr_dbg = (uint32_t)fb;
+    main_ltdc_isr_dbg = LTDC->ISR;
+    main_ltdc_ier_dbg = LTDC->IER;
+    main_ltdc_cdsr_dbg = LTDC->CDSR;
+    main_ltdc_layer0_cfbar_dbg = LTDC_Layer1->CFBAR;
+    main_ltdc_sample_count_dbg++;
+
+    isr = main_ltdc_isr_dbg;
+    if ((isr & LTDC_ISR_FUIF) != 0U)
+    {
+        main_ltdc_fu_count_dbg++;
+        LTDC->ICR = LTDC_ICR_CFUIF;
+    }
+    if ((isr & LTDC_ISR_TERRIF) != 0U)
+    {
+        main_ltdc_te_count_dbg++;
+        LTDC->ICR = LTDC_ICR_CTERRIF;
+    }
+}
+
+static void main_apply_tvp_sync_mode(void)
+{
+    if (main_tvp_external_sync_enable_dbg != 0U)
+    {
+        tvp5150_output_mode_dbg = TVP5150_OUTPUT_MODE_DISCRETE_SYNC;
+        dcmi_synchro_mode_dbg = DCMI_SYNCHRO_HARDWARE;
+        tvp_capture_vsync_resync_enable_dbg = 0U;
+        tvp_capture_publish_field_div_dbg = 2U;
+        tvp_capture_publish_field_phase_dbg = 0U;
+        tvp_capture_short_frame_drop_enable_dbg = 1U;
+    }
+    else
+    {
+        tvp5150_output_mode_dbg = TVP5150_OUTPUT_MODE_BT656;
+        dcmi_synchro_mode_dbg = DCMI_SYNCHRO_EMBEDDED;
+        tvp_capture_vsync_resync_enable_dbg = 1U;
+        tvp_capture_publish_field_div_dbg = 2U;
+        tvp_capture_publish_field_phase_dbg = 0U;
+        tvp_capture_short_frame_drop_enable_dbg = 1U;
+    }
+}
+
 static void jpeg_hw_layer_init(void)
 {
     MX_MDMA_Init();
@@ -388,6 +461,40 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   MX_GPIO_Init();
+  MX_I2C4_Init();
+  if (main_tvp_i2c1_conflict_enable_dbg != 0U)
+  {
+      MX_I2C1_Init();
+  }
+  MX_I2C2_Init();
+  main_apply_tvp_sync_mode();
+  TVP5150_I2CProbe_Run(&hi2c4);
+  main_tvp_i2c4_probe_ok_dbg = tvp5150_probe_ok_dbg;
+  main_tvp_i2c4_found_count_dbg = tvp5150_i2c_found_count_dbg;
+  if (tvp5150_probe_ok_dbg != 0U)
+  {
+      main_tvp_probe_bus_dbg = 4U;
+  }
+  else
+  {
+      TVP5150_I2CProbe_Run(&hi2c2);
+      main_tvp_i2c2_probe_ok_dbg = tvp5150_probe_ok_dbg;
+      main_tvp_i2c2_found_count_dbg = tvp5150_i2c_found_count_dbg;
+      if (tvp5150_probe_ok_dbg != 0U)
+      {
+          main_tvp_probe_bus_dbg = 2U;
+      }
+      else if (main_tvp_i2c1_conflict_enable_dbg != 0U)
+      {
+          TVP5150_I2CProbe_Run(&hi2c1);
+          main_tvp_i2c1_probe_ok_dbg = tvp5150_probe_ok_dbg;
+          main_tvp_i2c1_found_count_dbg = tvp5150_i2c_found_count_dbg;
+          if (tvp5150_probe_ok_dbg != 0U)
+          {
+              main_tvp_probe_bus_dbg = 1U;
+          }
+      }
+  }
   if (main_usb_init_early != 0U)
   {
       MX_USB_DEVICE_Init();
@@ -405,6 +512,7 @@ int main(void)
   if (main_display_enable != 0U)
   {
       display_layer_init();
+      display_sample_ltdc();
   }
 
   if (main_jpeg_hw_enable != 0U)
@@ -500,6 +608,14 @@ int main(void)
       main_usb_init_done = 1U;
   }
 
+  if (main_tvp_to_fb_enable != 0U)
+  {
+      main_test_pattern_enable = 0U;
+      cpu_fill_screen(0x0000U);
+      TVP5150_Capture_SetRGB565Target(fb, 320U, 480U);
+  }
+  TVP5150_Capture_Init(main_tvp_probe_bus_dbg);
+
 
 
 
@@ -518,6 +634,8 @@ int main(void)
     	  {
     	      draw_stream_test_pattern();
     	  }
+          display_sample_ltdc();
+    	  TVP5150_Capture_Poll();
     	  if ((main_stream_isolation_enable == 0U) &&
     	      (main_camera_pipeline_enable != 0U))
     	  {

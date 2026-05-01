@@ -22,6 +22,7 @@
 #include "stm32h7xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "dcmi.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -65,6 +66,7 @@ volatile uint32_t fault_mmfar = 0;
 extern PCD_HandleTypeDef hpcd_USB_OTG_HS;
 extern MDMA_HandleTypeDef hmdma_jpeg_infifo_th;
 extern MDMA_HandleTypeDef hmdma_jpeg_outfifo_th;
+extern MDMA_HandleTypeDef hmdma_tvp_capture;
 extern JPEG_HandleTypeDef hjpeg;
 /* USER CODE BEGIN EV */
 
@@ -264,6 +266,16 @@ void OTG_FS_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void DMA1_Stream0_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hdma_dcmi);
+}
+
+void DCMI_IRQHandler(void)
+{
+  HAL_DCMI_IRQHandler(&hdcmi);
+}
+
 void JPEG_IRQHandler(void)
 {
   /* USER CODE BEGIN JPEG_IRQn 0 */
@@ -285,6 +297,10 @@ void MDMA_IRQHandler(void)
   /* USER CODE END MDMA_IRQn 0 */
   HAL_MDMA_IRQHandler(&hmdma_jpeg_infifo_th);
   HAL_MDMA_IRQHandler(&hmdma_jpeg_outfifo_th);
+  if (hmdma_tvp_capture.Instance != 0)
+  {
+    HAL_MDMA_IRQHandler(&hmdma_tvp_capture);
+  }
   /* USER CODE BEGIN MDMA_IRQn 1 */
 
   /* USER CODE END MDMA_IRQn 1 */

@@ -127,8 +127,8 @@ void HAL_LTDC_MspInit(LTDC_HandleTypeDef* ltdcHandle)
     PI9     ------> LTDC_VSYNC
     PI10     ------> LTDC_HSYNC
     PF10     ------> LTDC_DE
-    PC0     ------> LTDC_R5 (disabled here: shared with USB_OTG_HS_ULPI_STP)
-    PB1     ------> LTDC_R6 (disabled here: shared with USB_OTG_HS_ULPI_D2)
+    PC0     ------> LTDC_R5
+    PB1     ------> LTDC_R6
     PH9     ------> LTDC_R3
     PH10     ------> LTDC_R4
     PG6     ------> LTDC_R7
@@ -170,8 +170,19 @@ void HAL_LTDC_MspInit(LTDC_HandleTypeDef* ltdcHandle)
     GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
     HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
-    /* PC0/LTDC_R5 and PB1/LTDC_R6 are intentionally not initialized for LTDC.
-       They are reserved for USB_OTG_HS ULPI in the HS test project. */
+    GPIO_InitStruct.Pin = GPIO_PIN_0;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = GPIO_PIN_1;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF9_LTDC;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     GPIO_InitStruct.Pin = GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_13|GPIO_PIN_15;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
@@ -223,8 +234,8 @@ void HAL_LTDC_MspDeInit(LTDC_HandleTypeDef* ltdcHandle)
     PI9     ------> LTDC_VSYNC
     PI10     ------> LTDC_HSYNC
     PF10     ------> LTDC_DE
-    PC0     ------> LTDC_R5 (disabled here: shared with USB_OTG_HS_ULPI_STP)
-    PB1     ------> LTDC_R6 (disabled here: shared with USB_OTG_HS_ULPI_D2)
+    PC0     ------> LTDC_R5
+    PB1     ------> LTDC_R6
     PH9     ------> LTDC_R3
     PH10     ------> LTDC_R4
     PG6     ------> LTDC_R7
@@ -250,6 +261,10 @@ void HAL_LTDC_MspDeInit(LTDC_HandleTypeDef* ltdcHandle)
                           |GPIO_PIN_7);
 
     HAL_GPIO_DeInit(GPIOF, GPIO_PIN_10);
+
+    HAL_GPIO_DeInit(GPIOC, GPIO_PIN_0);
+
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_1);
 
     HAL_GPIO_DeInit(GPIOH, GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_13|GPIO_PIN_15);
 
