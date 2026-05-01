@@ -66,6 +66,19 @@ volatile uint32_t usb_ll_iso_dtxfsts_after_write_dbg = 0U;
 volatile uint32_t usb_ll_iso_dieptsiz_before_write_dbg = 0U;
 volatile uint32_t usb_ll_iso_dieptsiz_after_write_dbg = 0U;
 volatile uint32_t usb_ll_iso_diepint_after_write_dbg = 0U;
+volatile uint32_t usb_ll_iso_schedule_same_parity_dbg = 0U;
+volatile uint32_t usb_ll_iso_write_before_enable_dbg = 0U;
+volatile uint32_t usb_ll_iso_after_recovery_dbg = 0U;
+volatile uint32_t usb_ll_iso_recovery_mode_dbg = 1U;
+volatile uint32_t usb_ll_iso_recovery_mode_used_dbg = 0U;
+volatile uint32_t usb_ll_iso_recovery_mode_consumed_dbg = 0U;
+volatile uint32_t usb_ll_iso_target_dsts_dbg = 0U;
+volatile uint32_t usb_ll_iso_target_odd_dbg = 0U;
+volatile uint32_t usb_ll_iso_write_pre_enable_used_dbg = 0U;
+volatile uint32_t usb_ll_iso_clear_iiso_before_submit_enable_dbg = 0U;
+volatile uint32_t usb_ll_iso_clear_iiso_before_submit_used_dbg = 0U;
+volatile uint32_t usb_ll_iso_gintsts_before_submit_clear_dbg = 0U;
+volatile uint32_t usb_ll_iso_gintsts_after_submit_clear_dbg = 0U;
 volatile uint32_t usb_ll_writepacket_calls_dbg = 0U;
 volatile uint32_t usb_ll_writepacket_ep_dbg = 0U;
 volatile uint32_t usb_ll_writepacket_len_dbg = 0U;
@@ -873,8 +886,59 @@ HAL_StatusTypeDef USB_EPStartXfer(USB_OTG_GlobalTypeDef *USBx, USB_OTG_EPTypeDef
       }
       else
       {
+        uint32_t iso_dsts_for_parity;
+        uint32_t iso_recovery_mode = 0U;
+        uint32_t iso_target_odd;
+        uint32_t iso_write_before_enable;
+
+        if ((is_iso_in_ep1 != 0U) &&
+            (ep->xfer_len > 0U) &&
+            (usb_ll_iso_after_recovery_dbg != 0U))
+        {
+          iso_recovery_mode = usb_ll_iso_recovery_mode_dbg;
+          usb_ll_iso_after_recovery_dbg = 0U;
+          usb_ll_iso_recovery_mode_used_dbg = iso_recovery_mode;
+          usb_ll_iso_recovery_mode_consumed_dbg++;
+        }
+
+        iso_write_before_enable =
+          ((is_iso_in_ep1 != 0U) &&
+           ((usb_ll_iso_write_before_enable_dbg != 0U) ||
+            ((iso_recovery_mode & 2U) != 0U)) &&
+           (ep->xfer_len > 0U)) ? 1U : 0U;
+
+        if (iso_write_before_enable != 0U)
+        {
+          usb_ll_iso_write_pre_enable_used_dbg++;
+          usb_ll_iso_dtxfsts_before_write_dbg = USBx_INEP(epnum)->DTXFSTS;
+          usb_ll_iso_dieptsiz_before_write_dbg = USBx_INEP(epnum)->DIEPTSIZ;
+
+          (void)USB_WritePacket(USBx, ep->xfer_buff, ep->num, (uint16_t)ep->xfer_len, dma);
+
+          usb_ll_iso_dtxfsts_after_write_dbg = USBx_INEP(epnum)->DTXFSTS;
+          usb_ll_iso_dieptsiz_after_write_dbg = USBx_INEP(epnum)->DIEPTSIZ;
+          usb_ll_iso_diepint_after_write_dbg = USBx_INEP(epnum)->DIEPINT;
+        }
+
         /* Select the target (micro)frame before enabling ISO IN endpoint. */
-        if ((USBx_DEVICE->DSTS & (1UL << 8)) == 0U)
+        iso_dsts_for_parity = USBx_DEVICE->DSTS;
+        if ((usb_ll_iso_schedule_same_parity_dbg != 0U) ||
+            ((iso_recovery_mode & 1U) != 0U))
+        {
+          iso_target_odd = ((iso_dsts_for_parity & (1UL << 8)) != 0U) ? 1U : 0U;
+        }
+        else
+        {
+          iso_target_odd = ((iso_dsts_for_parity & (1UL << 8)) == 0U) ? 1U : 0U;
+        }
+
+        if (is_iso_in_ep1 != 0U)
+        {
+          usb_ll_iso_target_dsts_dbg = iso_dsts_for_parity;
+          usb_ll_iso_target_odd_dbg = iso_target_odd;
+        }
+
+        if (iso_target_odd != 0U)
         {
           USBx_INEP(epnum)->DIEPCTL |= USB_OTG_DIEPCTL_SODDFRM;
         }
@@ -888,23 +952,43 @@ HAL_StatusTypeDef USB_EPStartXfer(USB_OTG_GlobalTypeDef *USBx, USB_OTG_EPTypeDef
           usb_ll_iso_diepctl_after_parity_dbg = USBx_INEP(epnum)->DIEPCTL;
         }
 
+        if ((is_iso_in_ep1 != 0U) &&
+            (usb_ll_iso_clear_iiso_before_submit_enable_dbg != 0U))
+        {
+          usb_ll_iso_gintsts_before_submit_clear_dbg = USBx->GINTSTS;
+          if ((usb_ll_iso_gintsts_before_submit_clear_dbg &
+               USB_OTG_GINTSTS_IISOIXFR) != 0U)
+          {
+            USBx->GINTSTS = USB_OTG_GINTSTS_IISOIXFR;
+            usb_ll_iso_clear_iiso_before_submit_used_dbg++;
+          }
+          usb_ll_iso_gintsts_after_submit_clear_dbg = USBx->GINTSTS;
+        }
+
         /* EP enable, IN data in FIFO */
         USBx_INEP(epnum)->DIEPCTL |= (USB_OTG_DIEPCTL_CNAK | USB_OTG_DIEPCTL_EPENA);
 
         if (is_iso_in_ep1 != 0U)
         {
           usb_ll_iso_diepctl_after_enable_dbg = USBx_INEP(epnum)->DIEPCTL;
-          usb_ll_iso_dtxfsts_before_write_dbg = USBx_INEP(epnum)->DTXFSTS;
-          usb_ll_iso_dieptsiz_before_write_dbg = USBx_INEP(epnum)->DIEPTSIZ;
         }
 
-        (void)USB_WritePacket(USBx, ep->xfer_buff, ep->num, (uint16_t)ep->xfer_len, dma);
-
-        if (is_iso_in_ep1 != 0U)
+        if (iso_write_before_enable == 0U)
         {
-          usb_ll_iso_dtxfsts_after_write_dbg = USBx_INEP(epnum)->DTXFSTS;
-          usb_ll_iso_dieptsiz_after_write_dbg = USBx_INEP(epnum)->DIEPTSIZ;
-          usb_ll_iso_diepint_after_write_dbg = USBx_INEP(epnum)->DIEPINT;
+          if (is_iso_in_ep1 != 0U)
+          {
+            usb_ll_iso_dtxfsts_before_write_dbg = USBx_INEP(epnum)->DTXFSTS;
+            usb_ll_iso_dieptsiz_before_write_dbg = USBx_INEP(epnum)->DIEPTSIZ;
+          }
+
+          (void)USB_WritePacket(USBx, ep->xfer_buff, ep->num, (uint16_t)ep->xfer_len, dma);
+
+          if (is_iso_in_ep1 != 0U)
+          {
+            usb_ll_iso_dtxfsts_after_write_dbg = USBx_INEP(epnum)->DTXFSTS;
+            usb_ll_iso_dieptsiz_after_write_dbg = USBx_INEP(epnum)->DIEPTSIZ;
+            usb_ll_iso_diepint_after_write_dbg = USBx_INEP(epnum)->DIEPINT;
+          }
         }
       }
     }

@@ -26,6 +26,7 @@
 #include "ux_api.h"
 #include "ux_device_class_video.h"
 #include "ux_device_stack.h"
+#include "app_usbx_device.h"
 
 
 #if defined(UX_DEVICE_STANDALONE)
@@ -154,6 +155,8 @@ UINT                            status;
         stream -> ux_device_class_video_stream_task_state = UX_STATE_RESET;
         stream -> ux_device_class_video_stream_task_status =
                         transfer -> ux_slave_transfer_request_completion_code;
+
+        USBX_FreezeCaptureNow(USBX_FREEZE_REASON_VIDEO_ERROR);
 
         /* Error notification!  */
         _ux_system_error_handler(UX_SYSTEM_LEVEL_THREAD, UX_SYSTEM_CONTEXT_CLASS, UX_TRANSFER_ERROR);

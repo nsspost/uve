@@ -46,7 +46,8 @@ __attribute__((section(".xsdram"), aligned(32)))
 uint16_t fb[320 * 480];
 
 volatile uint32_t uvc_process_from_main_poll_calls = 0;
-volatile uint32_t main_usb_only_mode = 0;
+volatile uint32_t main_usb_only_mode = 1;
+volatile uint32_t main_stream_isolation_enable = 1;
 volatile uint32_t main_test_pattern_enable = 0;
 volatile uint32_t main_test_pattern_updates = 0;
 volatile uint32_t main_test_pattern_period_ms = 500;
@@ -61,14 +62,14 @@ volatile uint32_t main_sdram_test_errors = 0;
 volatile uint32_t main_sdram_test_last_addr = 0;
 volatile uint32_t main_sdram_test_last_expected = 0;
 volatile uint32_t main_sdram_test_last_actual = 0;
-volatile uint32_t main_display_enable = 1;
+volatile uint32_t main_display_enable = 0;
 volatile uint32_t main_display_init_done = 0;
 volatile uint32_t main_display_pattern_done = 0;
 volatile uint32_t main_display_pattern_status = 0;
-volatile uint32_t main_jpeg_hw_enable = 1;
+volatile uint32_t main_jpeg_hw_enable = 0;
 volatile uint32_t main_mdma_init_done = 0;
 volatile uint32_t main_jpeg_init_done = 0;
-volatile uint32_t main_live_jpeg_enable = 1;
+volatile uint32_t main_live_jpeg_enable = 0;
 volatile uint32_t main_live_jpeg_init_done = 0;
 volatile uint32_t main_camera_pipeline_enable = 0;
 volatile uint32_t main_first_jpeg_ready_before_usb = 0;
@@ -456,7 +457,14 @@ int main(void)
       jpeg_hw_layer_init();
   }
 
-  if (main_usb_only_mode == 0U)
+  if (main_stream_isolation_enable != 0U)
+  {
+      main_test_pattern_enable = 0U;
+      main_live_jpeg_init_done = 0U;
+      main_camera_pipeline_enable = 0U;
+      camera_pipeline_force_test_jpeg = 1U;
+  }
+  else if (main_usb_only_mode == 0U)
   {
   if (main_sdram_init_done == 0U)
   {
@@ -509,17 +517,16 @@ int main(void)
 
   if (main_usb_init_done == 0U)
   {
-      const video_frame_t *first_frame = video_source_get_current_frame();
+      const video_frame_t *first_frame = 0;
 
-      main_first_jpeg_ready_before_usb =
-          ((first_frame != 0) && (first_frame->data != 0) && (first_frame->size != 0U)) ? 1U : 0U;
-      main_first_jpeg_size_before_usb =
-          (main_first_jpeg_ready_before_usb != 0U) ? first_frame->size : 0U;
-      main_first_jpeg_ptr_before_usb =
-          (main_first_jpeg_ready_before_usb != 0U) ? first_frame->data : 0;
-      if (main_first_jpeg_ready_before_usb == 0U)
+      if (main_stream_isolation_enable != 0U)
       {
-          video_source_init();
+          main_first_jpeg_ready_before_usb = 0U;
+          main_first_jpeg_size_before_usb = 0U;
+          main_first_jpeg_ptr_before_usb = 0;
+      }
+      else
+      {
           first_frame = video_source_get_current_frame();
           main_first_jpeg_ready_before_usb =
               ((first_frame != 0) && (first_frame->data != 0) && (first_frame->size != 0U)) ? 1U : 0U;
@@ -527,6 +534,17 @@ int main(void)
               (main_first_jpeg_ready_before_usb != 0U) ? first_frame->size : 0U;
           main_first_jpeg_ptr_before_usb =
               (main_first_jpeg_ready_before_usb != 0U) ? first_frame->data : 0;
+          if (main_first_jpeg_ready_before_usb == 0U)
+          {
+              video_source_init();
+              first_frame = video_source_get_current_frame();
+              main_first_jpeg_ready_before_usb =
+                  ((first_frame != 0) && (first_frame->data != 0) && (first_frame->size != 0U)) ? 1U : 0U;
+              main_first_jpeg_size_before_usb =
+                  (main_first_jpeg_ready_before_usb != 0U) ? first_frame->size : 0U;
+              main_first_jpeg_ptr_before_usb =
+                  (main_first_jpeg_ready_before_usb != 0U) ? first_frame->data : 0;
+          }
       }
 
       MX_USB_DEVICE_Init();
@@ -550,11 +568,14 @@ int main(void)
 
           main_usb_only_loop_calls++;
 
-    	  if ((main_usb_only_mode == 0U) && (main_test_pattern_enable != 0U))
+    	  if ((main_stream_isolation_enable == 0U) &&
+    	      (main_usb_only_mode == 0U) &&
+    	      (main_test_pattern_enable != 0U))
     	  {
     	      draw_stream_test_pattern();
     	  }
-    	  if (main_camera_pipeline_enable != 0U)
+    	  if ((main_stream_isolation_enable == 0U) &&
+    	      (main_camera_pipeline_enable != 0U))
     	  {
     	      camera_pipeline_update();
     	  }

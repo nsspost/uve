@@ -48,6 +48,7 @@ volatile uint32_t fault_dfsr = 0;
 volatile uint32_t fault_afsr = 0;
 volatile uint32_t fault_bfar = 0;
 volatile uint32_t fault_mmfar = 0;
+volatile uint32_t systick_irq_calls_dbg = 0;
 
 /* USER CODE END PV */
 
@@ -221,6 +222,7 @@ void PendSV_Handler(void)
 void SysTick_Handler(void)
 {
   /* USER CODE BEGIN SysTick_IRQn 0 */
+  systick_irq_calls_dbg++;
 
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();

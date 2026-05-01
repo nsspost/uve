@@ -365,13 +365,14 @@ uint16_t USBD_Get_Configuration_Number(uint8_t class_type, uint8_t interface_typ
 
 #define UVC_FRAME_WIDTH                               320U
 #define UVC_FRAME_HEIGHT                              236U
-#define UVC_CAM_FPS_FS                                10U
-#define UVC_CAM_FPS_HS                                5U
+#define UVC_FRAME_PERIOD_FS_MS                        100U
+#define UVC_FRAME_PERIOD_HS_MS                        80U
 
-#define UVC_MIN_BIT_RATE(n)                           (UVC_FRAME_WIDTH * UVC_FRAME_HEIGHT * 16U * (n))
-#define UVC_MAX_BIT_RATE(n)                           (UVC_FRAME_WIDTH * UVC_FRAME_HEIGHT * 16U * (n))
-#define UVC_INTERVAL(n)                               (10000000U/(n))
-#define UVC_MAX_FRAME_SIZE                            (UVC_FRAME_WIDTH * UVC_FRAME_HEIGHT * 16U / 2U)
+#define UVC_INTERVAL_FROM_PERIOD_MS(n)                ((n) * 10000U)
+#define UVC_FRAME_INTERVAL_FS                         UVC_INTERVAL_FROM_PERIOD_MS(UVC_FRAME_PERIOD_FS_MS)
+#define UVC_FRAME_INTERVAL_HS                         UVC_INTERVAL_FROM_PERIOD_MS(UVC_FRAME_PERIOD_HS_MS)
+#define UVC_MAX_FRAME_SIZE                            8192U
+#define UVC_BIT_RATE_FROM_INTERVAL(n)                 ((uint32_t)(((uint64_t)UVC_MAX_FRAME_SIZE * 8ULL * 10000000ULL) / (n)))
 
 #define VS_FORMAT_DESC_SIZE                           0x0BU
 #define VC_HEADER_SIZE                                0x37U

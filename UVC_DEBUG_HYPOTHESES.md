@@ -2677,3 +2677,872 @@ Counters:
 - Убрать/пересмотреть `ux_utility_delay_ms(USBD_VIDEO_IMAGE_LAPS)` внутри `video_write_payload()`: сейчас pcap показывает ритм ненулевых payload в основном `80 ms`, что совпадает с этой задержкой. Лучше управлять FPS внешним таймером/producer state, а не блокировать USBX payload-done путь.
 - Если после остановки `get_status` или `commit_status` становится `UX_BUFFER_OVERFLOW`/`UX_ERROR`, чинить ownership кольцевых payload buffers.
 - Если task state уходит в stop/reset/error, чинить USBX video task state.
+
+## 2026-04-30: подготовка следующего USBX-прогона после сверки descriptors
+
+Что изменено перед следующим тестом:
+
+- UVC frame interval теперь задан через периоды:
+  - FS: `UVC_FRAME_PERIOD_FS_MS = 100`, `UVC_FRAME_INTERVAL_FS = 1000000`;
+  - HS: `UVC_FRAME_PERIOD_HS_MS = 80`, `UVC_FRAME_INTERVAL_HS = 800000`.
+- Убран вводящий в заблуждение `UVC_CAM_FPS_HS`: реальная HS скорость этой сборки `12.5 fps`, а не целые `12 fps`.
+- `dwMinBitRate/dwMaxBitRate` считаются от `UVC_MAX_FRAME_SIZE`, а не от несжатого `width * height * 16`.
+- `UVC_MAX_FRAME_SIZE` для USBX выставлен в `8192`, чтобы соответствовать текущим тестовым MJPEG кадрам и classic UVC ветке, а не шаблонному буферу `604160`.
+- `VS_PROBE GET_*` и `VS_COMMIT GET_CUR` теперь возвращают согласованные `dwFrameInterval`, `dwMaxPayloadTransferSize`, `dwMaxVideoFrameSize` и `dwClockFrequency`.
+- Добавлена компактная диагностика `stream_write`:
+  - `usbx_video_stream_task_state_dbg`;
+  - `usbx_video_stream_task_status_dbg`;
+  - `usbx_video_stream_error_dbg`;
+  - `usbx_video_stream_buffer_error_count_dbg`;
+  - `usbx_video_stream_buffer_size_dbg`;
+  - `usbx_video_stream_payload_buffer_size_dbg`;
+  - `usbx_video_stream_transfer_pos_dbg`;
+  - `usbx_video_stream_access_pos_dbg`;
+  - `usbx_video_stream_transfer_len_dbg`;
+  - `usbx_video_stream_access_len_dbg`;
+  - `usbx_video_stream_endpoint_addr_dbg`;
+  - `usbx_video_stream_endpoint_mps_dbg`.
+
+Сборка:
+
+- `make -C Debug all -j8` через STM32CubeIDE 2.0.0 toolchain проходит успешно.
+- Размер после добавления diagnostics: `text=201560`, `data=456`, `bss=491824`.
+
+Что проверить после прошивки:
+
+- До старта stream: endpoint должен стать `0x81`, `mps = 512`.
+- Во время нормального потока:
+  - `usbx_video_get_status_dbg = 0`;
+  - `usbx_video_commit_status_dbg = 0`;
+  - `usbx_video_stream_buffer_error_count_dbg` не должен расти;
+  - `usbx_video_stream_transfer_len_dbg` и `usbx_video_stream_access_len_dbg` должны показывать, что кольцо payload не пустое постоянно.
+- После остановки ненулевых ISO payload в pcap:
+  - если `transfer_len/access_len` стали `0`, а `write_calls/payload_done` перестали расти, копать starvation очереди payload;
+  - если `buffer_error_count` растет, чинить ownership/ring buffer USBX video payload;
+  - если `task_state/task_status` ушли в reset/error, копать standalone USBX video task state;
+  - если очередь выглядит живой, но pcap получает только `data_len = 0`, снова смотреть DCD/HAL/FIFO path.
+
+## 2026-04-30: свежий USBX pcap после сверки descriptors
+
+Файл `C:\Users\Professional\Documents\UVC.pcapng`:
+
+- Обновлен `2026-04-30 19:18:31`, размер `5533884` bytes.
+- Устройство в захвате работает как USB address `33`.
+- `SET_INTERFACE alt=1`: frame `1933`, время `1.452466 s`.
+- Descriptor/probe в pcap согласованы с HS режимом:
+  - `dwFrameInterval = 800000`, то есть `80 ms`;
+  - `dwMaxPayloadTransferSize = 512`;
+  - `dwMaxVideoFrameSize = 8192`;
+  - `dwClockFrequency = 48000000`.
+- EP `0x81`: всего `3276` URB rows, из них `47` ненулевых и `3229` нулевых.
+- Восстановлено `40` завершенных UVC/MJPEG кадров, незавершенного хвоста нет.
+- Первый ненулевой UVC payload: frame `1983`, время `1.474526 s`.
+- Последний ненулевой UVC payload: frame `6181`, время `4.786525 s`, `data_len = 1004`.
+
+Ключевая картина по месту срыва:
+
+- До финального срыва есть два одиночных ISO `XACT_ERROR`:
+  - row `4329`, `3.218522 s`, `iso_error_count = 1`: кадр `#21`, ожидаемый `JPEG21_SIZE = 4303`, восстановлено `3793`, не хватает ровно одного `510`-байтного payload chunk; `SOI/EOI` есть.
+  - row `5725`, `4.370532 s`, `iso_error_count = 1`: кадр `#35`, ожидаемый `JPEG6_SIZE = 3309`, восстановлено `2799`, не хватает ровно одного `510`-байтного payload chunk; `SOI` отсутствует, `EOI` есть.
+- Финальный срыв не происходит внутри последнего JPEG:
+  - кадр `#39`, ожидаемый `JPEG10_SIZE = 4060`, восстановлен полностью, `SOI/EOI` есть;
+  - EOF этого кадра приходит в row `6181`, descriptor `86`, microframe `169036340`;
+  - в том же URB после EOF идут `40` ISO descriptors с `USBD_STATUS_XACT_ERROR`;
+  - следующий URB row `6199`, `4.802527 s`, уже полностью `128/128 XACT_ERROR`, `data_len = 0`;
+  - дальше поток уходит в нулевые/ошибочные URB без восстановления payload.
+
+Вывод:
+
+- Это уже не тот же pcap-паттерн, что предыдущий прогон с address `28`, где после последнего payload не было `usb.iso.error_count > 0` и дальше шли успешные нулевые URB.
+- Если под "тем же местом" понимать конкретный JPEG index/offset, то нет: одиночные потери пришлись на `JPEG21` и `JPEG6`, а финальный срыв случился сразу после полного `JPEG10`.
+- Если под "тем же местом" понимать фазу передачи, то похоже: критический срыв начинается на границе после завершенного кадра, когда нужно перейти к следующему payload/следующему кадру.
+- Одиночные `XACT_ERROR` снова совпадают с отсутствием ровно одного UVC payload chunk на шине. Это возвращает в подозреваемые DCD/HAL/FIFO/ISO scheduling path, а не только USBX payload queue starvation.
+
+Что проверить в отладчике:
+
+- `usbx_video_stream_task_state_dbg = 33` означает `UX_DEVICE_CLASS_VIDEO_STREAM_RW_START` (`UX_STATE_STEP + 1`, при `UX_STATE_STEP = 0x20`), а не само по себе ошибку.
+- Watch expressions должны использовать полные имена:
+  - `usbx_video_stream_task_status_dbg`;
+  - `usbx_video_stream_buffer_error_count_dbg`;
+  - `usbx_video_stream_transfer_len_dbg`;
+  - `usbx_video_stream_access_len_dbg`;
+  - `usbx_video_get_status_dbg`;
+  - `usbx_video_commit_status_dbg`;
+  - `usbx_video_write_calls_dbg`;
+  - `usbx_video_payload_done_dbg`.
+- Эти symbols не выкинуты линкером: они есть в `Debug/BaseH743.map` в `.bss` около `0x2400411c..0x24004180`.
+
+Следующие действия:
+
+- Считать текущий pcap подтверждением, что после descriptor-сверки проблема снова видна как низкоуровневый ISO IN `XACT_ERROR`.
+- В следующем прогоне ловить значения debug counters сразу после первого одиночного `XACT_ERROR` и после финального row `6181`-подобного срыва.
+- Если USBX counters выглядят живыми (`get/commit = 0`, очередь не пустая, task state не error), копать DCD/HAL обработку ISO IN completion/error и состояние EP1/FIFO вокруг первого `XACT_ERROR`.
+
+## 2026-04-30 19:37:25: новый pcap с DCD debug counters
+
+Файл `C:\Users\Professional\Documents\UVC.pcapng`:
+
+- Обновлен `2026-04-30 19:37:25`, размер `11779756` bytes.
+- Устройство в захвате: USB address `36`.
+- `SET_INTERFACE alt=1`: frame `2645`, время `1.431008 s`.
+- `SET_INTERFACE alt=0`: frame `19269`, время `7.215596 s`.
+- EP `0x81`, ISO IN rows с `128` descriptors: `6568`.
+- Ненулевые ISO IN URB: `19`.
+- Первые данные: frame `2689`, `1.452519 s`, `data_len = 1024`.
+- Последние данные: frame `4819`, `2.764540 s`, `data_len = 979`.
+- Первый error после старта потока:
+  - frame `4467`, `2.524524 s`, `data_len = 3450`, `iso_error_count = 1`;
+  - это одиночная потеря одного `510`-byte UVC payload chunk.
+- Финальный срыв:
+  - frame `4827`, `2.780528 s`, `data_len = 0`, `iso_error_count = 127`;
+  - frame `4861`, `2.796521 s`, `data_len = 0`, `USBD_STATUS_ISOCH_REQUEST_FAILED`, `iso_error_count = 128`;
+  - дальше payload data уже не восстанавливается до `SET_INTERFACE alt=0`.
+
+Реконструкция MJPEG/UVC payload:
+
+- Восстановлено `16` завершенных кадров.
+- Последовательность размеров совпадает с `JPEG0..JPEG15` из `USBX/Stream/stream1.h`:
+  - `1742, 1993, 2663, 2785, 2932, 3080, 3309, 3387, 3433, 3629, 4060, 3977, 3946, 3469, 3974, 4035`.
+- `JPEG13_SIZE` должен быть `3979`, но восстановлено `3469`: ровно минус один `510`-byte payload chunk из-за одиночного `XACT_ERROR` в frame `4467`. `SOI/EOI` при этом есть.
+- Последний кадр перед финальным срывом: `JPEG15`, восстановлен полностью `4035/4035`, `SOI/EOI` есть.
+- Следующий ожидаемый кадр `JPEG16_SIZE = 4119`; его `SOI` в pcap уже не появляется.
+
+Снимок watch variables после срыва:
+
+- `usbx_video_stream_task_status_dbg = 0`.
+- `usbx_video_stream_buffer_error_count_dbg = 0`.
+- `usbx_video_get_status_dbg = 0`.
+- `usbx_video_commit_status_dbg = 0`.
+- `usbx_video_write_calls_dbg = 112`.
+- `usbx_video_payload_done_dbg = 110`.
+- `usbx_dcd_run_tx_calls_dbg = 127`.
+- `usbx_dcd_run_tx_status_dbg = 0`.
+- `usbx_dcd_data_in_calls_dbg = 138`.
+- `usbx_dcd_iso_incomplete_calls_dbg = 0`.
+
+Вывод по этому прогону:
+
+- Это не запись нулевого JPEG: последний MJPEG кадр полный, а следующий MJPEG кадр в pcap вообще не начинается.
+- Срыв снова происходит на границе после завершенного кадра, но не на том же JPEG index, что в предыдущем pcap:
+  - прошлый срыв был после полного `JPEG10`;
+  - текущий срыв после полного `JPEG15`.
+- Если сравнивать фазу, место похоже: переход от завершенного кадра к следующему payload/frame.
+- USBX-level counters не показывают ошибку очереди (`get/commit/status/buffer_error = 0`), а DCD transmit status тоже `0`.
+- `usbx_dcd_iso_incomplete_calls_dbg = 0` при наличии host-side `XACT_ERROR` в pcap означает, что текущая прошивка, вероятно, не видит ISO incomplete interrupt path. Это совместимо с маскированием `IISOIXFRM`.
+
+Следующее диагностическое действие:
+
+- Для следующего прогона не менять UVC descriptors/probe.
+- Развести два вопроса:
+  - "USBX не ставит следующий payload" - ловить через `write_calls/payload_done/transfer_len/access_len`;
+  - "DCD/HAL поставил transfer, но OTG/host получил XACT" - ловить через EP1 registers/FIFO и немаскированный `IISOIXFR`.
+- Диагностически включить видимость `IISOIXFR`/`ISOINIncomplete` и логировать первый момент, когда pcap получает `XACT_ERROR`, но firmware still reports `HAL_OK`.
+
+## 2026-04-30: masked IISOIXFR polling diagnostic
+
+Изменение:
+
+- UVC descriptors/probe не менялись.
+- `IISOIXFRM` остается замаскированным, чтобы не возвращать старый interrupt storm / HAL abort path.
+- Добавлен polling sticky-бита `USB_OTG_HS->GINTSTS & USB_OTG_GINTSTS_IISOIXFR` в `MX_USBX_Device_Process()`.
+- Если bit замечен, firmware сохраняет snapshot EP1 IN registers и очищает только sticky `IISOIXFR` bit.
+
+Новые watch variables:
+
+- `usbx_iisoixfr_poll_count_dbg`;
+- `usbx_iisoixfr_poll_first_gintsts_dbg`;
+- `usbx_iisoixfr_poll_first_gintmsk_dbg`;
+- `usbx_iisoixfr_poll_first_dsts_dbg`;
+- `usbx_iisoixfr_poll_first_diepctl_dbg`;
+- `usbx_iisoixfr_poll_first_dieptsiz_dbg`;
+- `usbx_iisoixfr_poll_first_diepint_dbg`;
+- `usbx_iisoixfr_poll_first_dtxfsts_dbg`;
+- `usbx_iisoixfr_poll_last_gintsts_dbg`;
+- `usbx_iisoixfr_poll_last_gintmsk_dbg`;
+- `usbx_iisoixfr_poll_last_dsts_dbg`;
+- `usbx_iisoixfr_poll_last_diepctl_dbg`;
+- `usbx_iisoixfr_poll_last_dieptsiz_dbg`;
+- `usbx_iisoixfr_poll_last_diepint_dbg`;
+- `usbx_iisoixfr_poll_last_dtxfsts_dbg`.
+
+Как читать следующий прогон:
+
+- Если pcap показывает `XACT_ERROR`, а `usbx_iisoixfr_poll_count_dbg` растет, OTG core сам сообщает incomplete, но interrupt path скрыт маской. Тогда дальше смотреть `DIEPCTL/DIEPTSIZ/DTXFSTS/DIEPINT` на первом snapshot.
+- Если pcap показывает `XACT_ERROR`, а `usbx_iisoixfr_poll_count_dbg = 0`, значит host-side XACT не сопровождается sticky `IISOIXFR`; тогда подозрение смещается к тому, что EP не был вооружен вовремя или USBX/DCD state machine остановилась до программирования transfer.
+- Если `first_dieptsiz` содержит активный `XFRSIZ/PKTCNT`, а `DIEPCTL.EPENA` выставлен, payload был поставлен в OTG на момент incomplete.
+- Если `first_dieptsiz = 0` или `DIEPCTL.EPENA = 0`, надо копать, почему следующий payload не был armed после полного EOF кадра.
+
+Сборка:
+
+- `make -C Debug all -j8` проходит успешно.
+- Размер: `text=201904`, `data=456`, `bss=491888`.
+
+## 2026-04-30 19:49:01: pcap после masked IISOIXFR polling
+
+Файл `C:\Users\Professional\Documents\UVC.pcapng`:
+
+- Обновлен `2026-04-30 19:49:01`, размер `19753848` bytes.
+- Устройство в захвате: USB address `45`.
+- `SET_INTERFACE alt=1`: frame `2587`, время `1.368502 s`.
+- `SET_INTERFACE alt=0`: frame `31981`, время `10.379370 s`.
+- EP `0x81`, ISO IN rows с `128` descriptors: `10790`.
+- Ненулевые ISO IN URB: `27`.
+- Первый payload: frame `2649`, `1.390321 s`, `data_len = 1024`.
+- Последний payload: frame `6921`, `3.214315 s`, `data_len = 737`, `iso_error_count = 112`.
+- Следующий URB: frame `6951`, `3.230314 s`, `data_len = 0`, `USBD_STATUS_ISOCH_REQUEST_FAILED`, `iso_error_count = 128`.
+- После frame `6951` payload уже не восстанавливается до `SET_INTERFACE alt=0`.
+
+Реконструкция MJPEG/UVC payload:
+
+- Восстановлено `22` завершенных кадров.
+- Последовательность размеров совпадает с `JPEG0..JPEG21` из `USBX/Stream/stream1.h`:
+  - `1742, 1993, 2663, 2785, 2932, 3080, 3309, 3387, 3433, 3629, 4060, 3977, 3946, 3979, 3974, 4035, 4119, 4312, 4282, 4292, 4298, 4303`.
+- В этом прогоне до финального срыва нет ранних одиночных payload losses: все `JPEG0..JPEG21` полные, `SOI/EOI` есть.
+- Последний кадр перед срывом: `JPEG21`, восстановлен полностью `4303/4303`.
+- Следующий ожидаемый кадр `JPEG22_SIZE = 4305`; его `SOI` в pcap не появляется.
+- Финальный URB frame `6921` содержит два последних payload chunk кадра `JPEG21`:
+  - `hdr=0200`, payload `510`;
+  - `hdr=0202`, EOF payload `223`;
+  - после EOF в том же URB остаются `112` host-side `XACT_ERROR`.
+
+Снимок watch variables после срыва:
+
+- `usbx_video_stream_task_status_dbg = 0`.
+- `usbx_video_stream_buffer_error_count_dbg = 0`.
+- `usbx_video_get_status_dbg = 0`.
+- `usbx_video_commit_status_dbg = 0`.
+- `usbx_video_write_calls_dbg = 166`.
+- `usbx_video_payload_done_dbg = 164`.
+- `usbx_dcd_run_tx_calls_dbg = 181`.
+- `usbx_dcd_run_tx_status_dbg = 0`.
+- `usbx_dcd_data_in_calls_dbg = 192`.
+- `usbx_dcd_iso_incomplete_calls_dbg = 0`.
+- `usbx_iisoixfr_poll_count_dbg = 50417`.
+
+Вывод по этому прогону:
+
+- `payload_done_dbg = 164` точно совпадает с числом успешно восстановленных UVC payload packets в pcap.
+- `write_calls_dbg = 166` означает, что после последнего successful payload в USBX queue остаются два подготовленных payload. Это не похоже на остановку producer/app layer.
+- `get/commit/status/buffer_error = 0`, значит USBX video queue не сообщает ошибку.
+- `dcd_run_tx_status_dbg = 0`, значит DCD/HAL path не возвращает ошибку при постановке transfer.
+- `usbx_iisoixfr_poll_count_dbg = 50417` подтверждает, что OTG core действительно видит ISO IN incomplete events даже при замаскированном `IISOIXFRM`.
+- `usbx_dcd_iso_incomplete_calls_dbg = 0` теперь объясняется маской interrupt: callback не вызывается, но sticky bit виден polling-диагностикой.
+- Это сильнее смещает подозрение с UVC payload generation/descriptors на OTG ISO IN scheduling / endpoint frame parity / Tx FIFO / HAL low-level state after masked incomplete.
+
+Следующее, что нужно снять в watch после такого срыва:
+
+- `usbx_iisoixfr_poll_first_diepctl_dbg`;
+- `usbx_iisoixfr_poll_first_dieptsiz_dbg`;
+- `usbx_iisoixfr_poll_first_diepint_dbg`;
+- `usbx_iisoixfr_poll_first_dtxfsts_dbg`;
+- `usbx_iisoixfr_poll_last_diepctl_dbg`;
+- `usbx_iisoixfr_poll_last_dieptsiz_dbg`;
+- `usbx_iisoixfr_poll_last_diepint_dbg`;
+- `usbx_iisoixfr_poll_last_dtxfsts_dbg`.
+
+Интерпретация:
+
+- Если `DIEPCTL.EPENA = 1` и `DIEPTSIZ` содержит ненулевые `XFRSIZ/PKTCNT`, transfer был armed, но не дошел до host.
+- Если `DIEPCTL.EPENA = 0` или `DIEPTSIZ = 0`, очередь USBX содержит payload, но EP1 не armed в момент incomplete.
+
+## 2026-04-30 20:29:24: no-delay experiment признан ошибочным
+
+Файл `C:\Users\Professional\Documents\UVC.pcapng`:
+
+- Обновлен `2026-04-30 20:29:24`, размер `12217588` bytes.
+- Устройство в захвате: USB address `41`.
+- `SET_INTERFACE`: frames `1275` (`0.829977 s`) и `4413` (`2.934950 s`).
+- EP `0x81` после второго `SET_INTERFACE`: `7804` ISO IN rows.
+- Ненулевые ISO IN URB: `114`.
+- URB с `iso_error_count > 0`: `1260`.
+- Последний ненулевой payload: frame `7223`, `4.764316 s`, `data_len = 3732`, `iso_error_count = 0`.
+- Первый полный отказ: frame `7251`, `4.780300 s`, `data_len = 0`, `iso_error_count = 128`.
+- Сразу после этого host делает `URB_FUNCTION_ABORT_PIPE`, дальше идут серии `data_len = 0` и повторные `iso_error_count = 128`.
+
+Вывод:
+
+- Удаление `ux_utility_delay_ms(USBD_VIDEO_GetFramePeriodMs())` было ошибкой. Без паузы поток может сорваться уже на первом кадре или быстро перейти в поток header-only/payload bursts.
+- Откатить no-delay/header-only pacing и оставить исходную frame pause.
+- Несмотря на ошибочность эксперимента, ring trace полезен: в момент отказа есть `WAIT` при активном transfer request и затем плотный `IISO`.
+- Снимок регистров из ring trace:
+  - `DIEPCTL = 0x80448200`: EP1 IN enabled, ISO, MPS 512, TxFIFO 1.
+  - `DIEPTSIZ = 0x20080000`: PKTCNT/MULCNT выставлены, `XFRSIZ = 0`.
+  - `DIEPINT = 0x2090`: `ITTXFE`, `TXFE`, `NAK`; `XFRC = 0`.
+  - `DTXFSTS = 0x280`.
+- Это классифицирует отказ как `SUBMIT -> IISO -> no DATI/XFRC`, ближе к low-level ISO scheduling/FIFO/odd-even/recovery, а не к producer/cache/ownership.
+
+Изменение после этого прогона:
+
+- В `ux_device_video.c` возвращена пауза `ux_utility_delay_ms(USBD_VIDEO_GetFramePeriodMs())` перед commit EOF packet.
+- Убран экспериментальный header-only pacing (`VIDL`, `video_next_frame_tick`, `usbx_video_header_only_dbg`, `usbx_video_wait_frame_dbg`).
+- `IISO` ring logging больше не считает изменение только `DSTS` новым событием; иначе буфер забивается каждым микрофреймом и теряет события перед отказом.
+- Периодический forced snapshot `IISO` оставлен раз в `4096` polls.
+
+## 2026-04-30 20:52:06: USBX stuck in WAIT после masked IISO
+
+Новый ring trace:
+
+- Ring заполнен `WAIT`, редкие `IISO` snapshots.
+- `WAIT`: `a0 = 0x81`, `a1 = 0x200`, `a2 = 0x3`.
+  - EP `0x81`;
+  - requested length `512`;
+  - ED status `0x3 = USED | TRANSFER`;
+  - `DONE` отсутствует.
+- `WAIT.a4 = 0x1ce`, то есть `done_seen = 462`.
+- `IISO`: `payload_done = 0x1ce`, `write_calls = 0x1d0`, `suppressed = 0xfff`.
+- `DIEPCTL = 0x80448200`, `DIEPTSIZ = 0x20080000`, `DIEPINT = 0x2090`, `DTXFSTS = 0x280`.
+- `usbx_iisoixfr_poll_count_dbg = 135667`.
+
+Вывод:
+
+- Это уже не отсутствие producer data: приложение подготовило больше payload, чем было завершено.
+- USBX/DCD застрял на одном EP1 transfer: `TRANSFER` есть, `DONE` не появляется.
+- Так как `IISOIXFRM` замаскирован, HAL callback не вызывается; polling видел sticky `IISOIXFR`, но до этой правки только очищал bit и не освобождал ED.
+
+Изменение:
+
+- Добавлен masked-IISO recovery path в `USBX_PollMaskedIISOIXFR()`.
+- Если EP1 ED находится в `TRANSFER` без `DONE`, текущий ISO packet считается потерянным:
+  - `HAL_PCD_EP_Abort(0x81)`;
+  - `USB_FlushTxFifo(EP1)`;
+  - current `UX_SLAVE_TRANSFER` помечается `UX_SUCCESS`, `UX_TRANSFER_STATUS_COMPLETED`, `actual_length = 0`;
+  - ED получает `DONE`, чтобы `_ux_dcd_stm32_transfer_run()` вернул `UX_STATE_NEXT`;
+  - UVC class освобождает текущий payload и ставит следующий.
+- Добавлен trace event `IREC` (`0x49524543`) и watch-переменные:
+  - `usbx_iisoixfr_recovery_enable_dbg`;
+  - `usbx_iisoixfr_recovery_calls_dbg`;
+  - `usbx_iisoixfr_recovery_skip_dbg`;
+  - `usbx_iisoixfr_recovery_abort_status_dbg`;
+  - `usbx_iisoixfr_recovery_flush_status_dbg`;
+  - `usbx_iisoixfr_recovery_ed_status_dbg`;
+  - `usbx_iisoixfr_recovery_transfer_status_dbg`;
+  - `usbx_iisoixfr_recovery_req_len_dbg`;
+  - `usbx_iisoixfr_recovery_diepctl_dbg`;
+  - `usbx_iisoixfr_recovery_dieptsiz_dbg`;
+  - `usbx_iisoixfr_recovery_diepint_dbg`;
+  - `usbx_iisoixfr_recovery_dtxfsts_dbg`.
+- `WAIT` trace разрежен с каждого `0x400` до каждого `0x4000` wait-loop, чтобы кольцо сохраняло больше событий восстановления.
+
+Ожидаемая интерпретация следующего прогона:
+
+- Если `IREC` появляется и после него идут `DONE -> VDON -> VCOM/SUBM`, recovery освобождает USBX state machine.
+- Если `IREC` появляется постоянно, но payload на host не восстанавливается, проблема ниже: abort/flush не возвращают EP1 в рабочее состояние или следующий `USB_EPStartXfer` программирует неверный frame parity.
+- Если `usbx_iisoixfr_recovery_abort_status_dbg != 0`, смотреть, не зависает ли `EPENA` при abort.
+
+## 2026-04-30 21:02:51: recovery unblocks USBX, but stream falls into IISO storm
+
+Fresh USBPcap:
+
+- File `C:\Users\Professional\Documents\UVC.pcapng`, size `23894692` bytes, duration `25.705 s`.
+- UVC stream is `bus 1 / device 1 / EP 0x81`.
+- Last non-zero EP81 URB: frame `27576`, `18.760838 s`, `Packet Data Length = 627`.
+- That last non-zero URB is already damaged: `Isochronous transfer error count = 71`.
+- Next EP81 URB: frame `27593`, `18.776836 s`, `Packet Data Length = 0`, `Isochronous transfer error count = 128`; all ISO descriptors are `USBD_STATUS_XACT_ERROR`.
+- No `SET_INTERFACE` or stream reset follows; host keeps scheduling EP81 IN, but device produces no valid ISO transactions.
+
+Firmware ring from same run:
+
+- `IREC` works mechanically: `abort_status = 0`, `flush_status = 0`.
+- After `IREC`, `_ux_dcd_stm32_transfer_run()` sees `DONE`, callback `VDON` runs with `length = 0`, and video immediately commits the next payload.
+- Then the next `SUBM` is followed by another `IISO -> IREC`, repeatedly.
+
+Interpretation:
+
+- The first recovery fixed the USBX busy-state deadlock, but it did not resynchronize the video producer/frame boundary.
+- A recovered ISO packet with `actual_length = 0` was treated like a normal completed payload, so UVC kept advancing inside a damaged frame and resubmitting immediately.
+- This matches a low-level ISO phase/scheduling miss plus missing class-level resync, not a JPEG producer/cache ownership failure.
+
+Change:
+
+- Added `usbx_video_iso_recovery_pending_dbg`.
+- `IREC` increments this flag.
+- `USBD_VIDEO_StreamPayloadDone()` now treats `length == 0 && recovery_pending != 0` as frame damage:
+  - logs `VRSY`;
+  - resets `video_packet_index` to `0`;
+  - waits one `USBD_VIDEO_GetFramePeriodMs()` before preparing the next payload.
+- Added watch variables:
+  - `usbx_video_iso_recovery_pending_dbg`;
+  - `usbx_video_resync_count_dbg`;
+  - `usbx_video_resync_delay_ms_dbg`.
+
+Next run:
+
+- If recovery is correct, trace should show occasional `IISO -> IREC -> DONE -> VDON(0) -> VRSY -> VCOM/SUBM`, followed by valid `DATI` again.
+- If it becomes `IISO -> IREC -> VRSY` forever, the remaining suspect is STM32 ISO odd/even frame scheduling or HAL re-arm timing after abort/flush.
+
+## 2026-04-30 21:10:49: VRSY works, but every next SUBM still misses
+
+Fresh USBPcap:
+
+- File `C:\Users\Professional\Documents\UVC.pcapng`, size `14801704` bytes, duration `8.820616 s`.
+- UVC stream is `bus 1 / device 60 / EP 0x81`.
+- Last non-zero EP81 URB: frame `5161`, `3.406271 s`, `data_len = 1536`.
+- After frame `5187` / `3.422260 s`, EP81 remains scheduled but payload is zero.
+
+Firmware ring:
+
+- `usbx_iisoixfr_recovery_calls_dbg = 0x2e`.
+- `usbx_video_resync_count_dbg = 0x2e`.
+- `usbx_video_iso_recovery_pending_dbg = 0`.
+- The ring is a stable repeated pattern:
+  - `VCOM -> SUBM -> IISO -> IREC -> DONE -> VDON(length=0) -> VRSY`.
+- `VRSY.a5 = 0x50`, so the class-level resync waits one full frame period.
+- The next `SUBM` still immediately produces `IISO`.
+
+Interpretation:
+
+- Video/class resync is confirmed working but irrelevant to the root cause.
+- The remaining fault is below UVC: ISO IN is being armed in a frame/microframe where the controller does not transmit.
+- `SUBM` snapshots still show `DIEPINT = 0x2090`, `DIEPTSIZ = 0x20080000`, `DTXFSTS = 0x280`, matching `SUBM -> IISO -> no XFRC/DATI`.
+
+Change:
+
+- Added low-level ISO scheduling experiment in `USB_EPStartXfer()` for EP1 ISO IN:
+  - `usb_ll_iso_schedule_same_parity_dbg = 1` schedules the same odd/even parity as the current `DSTS.FNSOF` bit, giving the controller one extra microframe instead of targeting the nearest opposite parity.
+  - `usb_ll_iso_write_before_enable_dbg = 1` writes the packet FIFO before setting `EPENA`.
+- Added watch variables:
+  - `usb_ll_iso_target_dsts_dbg`;
+  - `usb_ll_iso_target_odd_dbg`;
+  - `usb_ll_iso_write_pre_enable_used_dbg`;
+  - existing `usb_ll_iso_*` and `usb_ll_writepacket_*` variables remain useful.
+
+## 2026-04-30: same-parity scheduling breaks stream start
+
+User run after the low-level experiment:
+
+- Stream did not start.
+- `usbx_iisoixfr_recovery_calls_dbg = 0x2d`.
+- `usbx_video_resync_count_dbg = 0x2d`.
+- `usb_ll_iso_schedule_same_parity_dbg = 1`.
+- `usb_ll_iso_write_before_enable_dbg = 1`.
+- `usb_ll_iso_write_pre_enable_used_dbg = 0x34`.
+- `usb_ll_iso_dtxfsts_before_write_dbg = 0x300`.
+- `usb_ll_iso_dtxfsts_after_write_dbg = 0x280`.
+- `usb_ll_iso_diepctl_after_enable_dbg = 0x80458200`.
+
+Interpretation:
+
+- FIFO pre-write is real: `DTXFSTS 0x300 -> 0x280` means one 512-byte packet was written before endpoint enable.
+- Same-parity scheduling is a bad default on this controller/path: after the change the firmware immediately repeats `SUBM -> IREC -> DONE(0) -> VRSY`, with no `DATI`.
+- Therefore the next isolated test is old/opposite parity plus pre-write FIFO.
+
+Change:
+
+- `usb_ll_iso_schedule_same_parity_dbg` default changed back to `0`.
+- `usb_ll_iso_write_before_enable_dbg` remains `1`.
+
+Next run:
+
+- If the stream starts again and lives longer, FIFO-empty-at-enable was likely part of the failure, while same-parity scheduling was wrong.
+- If the stream still does not start, disable pre-write at runtime with `set var usb_ll_iso_write_before_enable_dbg=0` before starting the stream to return to the previous low-level order without reflashing.
+
+## 2026-04-30 21:24:12: pre-write also prevents stream start
+
+Fresh USBPcap:
+
+- File `C:\Users\Professional\Documents\UVC.pcapng`, size `4807204` bytes.
+- UVC device is USB address `9`.
+- `SET_INTERFACE alt=1`: frame `1981`, `1.292909 s`.
+- `SET_INTERFACE alt=0`: frame `7047`, `4.307203 s`.
+- Between alt=1 and alt=0, EP `0x81` is polled, but all captured rows for this device have `data_len = 0`.
+- For device `9`, EP `0x81` summary is `380` rows, all zero data.
+
+Interpretation:
+
+- The old/opposite parity plus FIFO pre-write still does not start the stream.
+- Therefore pre-write-before-EPENA is not a safe default on this OTG HS device path, even though `DTXFSTS` proved that the packet was written into FIFO.
+- The earlier "stream starts then later freezes" behavior is preferable for diagnosis because it gives successful `DATI/XFRC` before the failure. We should return the low-level transmit ordering to the previous default before trying another recovery idea.
+
+Change:
+
+- `usb_ll_iso_schedule_same_parity_dbg = 0`.
+- `usb_ll_iso_write_before_enable_dbg = 0`.
+- The diagnostic code remains in place so both experiments can still be enabled from GDB if needed.
+
+Next run:
+
+- Confirm that the stream starts again with both low-level experiments disabled.
+- If it returns to "runs then freezes", continue debugging the first `SUBM -> IISO -> no DATI/XFRC` transition using the ring trace and EP1 register snapshots.
+
+## 2026-04-30: flush USBX payload queue on ISO recovery resync
+
+Reasoning:
+
+- `IISOIXFR` recovery marked the active transfer as completed with `actual_length = 0`.
+- `USBD_VIDEO_StreamPayloadDone()` then reset `video_packet_index = 0`, so the next generated payload started a new UVC frame and toggled `FID`.
+- But USBX can already have committed payload buffers ahead of the active transfer (`write_calls > payload_done` was observed).
+- Those queued payloads may belong to the damaged old frame. If they are sent after recovery, the host can see stale frame tail before the new clean frame/FID and fail to resync.
+
+Change:
+
+- Added `USBD_VIDEO_FlushPayloadQueue()` and call it from the `VRSY` recovery path before generating the next payload.
+- The helper clears all USBX video payload ring entries:
+  - every `ux_device_class_video_payload_length = 0`;
+  - payload data bytes zeroed;
+  - `transfer_pos` reset to `access_pos`, matching the USBX alt-setting reset pattern.
+- Added watch variables:
+  - `usbx_video_payload_flush_count_dbg`;
+  - `usbx_video_payload_flush_slots_dbg`;
+  - `usbx_video_payload_flush_nonzero_dbg`;
+  - `usbx_video_payload_flush_bytes_dbg`;
+  - `usbx_video_payload_flush_transfer_pos_dbg`;
+  - `usbx_video_payload_flush_access_pos_dbg`.
+- `VRSY` trace now uses:
+  - `a9 = usbx_video_payload_flush_nonzero_dbg`;
+  - `a10 = usbx_video_stream_transfer_len_dbg`;
+  - `a11 = usbx_video_stream_access_len_dbg`.
+
+Expected next run:
+
+- On the first recovery, `usbx_video_payload_flush_nonzero_dbg` should show whether stale committed payloads existed.
+- After `VRSY`, `transfer_len/access_len` should be `0` before the new payload commit.
+- If the stream still enters `SUBM -> IISO -> IREC -> VRSY` forever, stale USBX queued payloads were not the root cause; the remaining suspect stays low-level ISO arm/schedule/FIFO after abort/flush.
+
+## 2026-04-30 22:00:56: recovery can return data, but FID is not clean across gaps
+
+Fresh USBPcap:
+
+- File `C:\Users\Professional\Documents\UVC.pcapng`, size `18954136` bytes.
+- UVC device is USB address `3`.
+- `SET_INTERFACE alt=1`: frame `2197`, `1.420831 s`.
+- EP `0x81`: `10406` ISO rows, `101` non-zero rows, `10305` zero rows.
+- First non-zero ISO data: frame `2317`, `1.506278 s`.
+- Last non-zero ISO data: frame `18539`, `12.578268 s`, `data_len = 4310`.
+- After frame `18539`, EP81 continues with `data_len = 0` until the end of capture at `18.508553 s`.
+
+Non-zero ISO data arrives in five blocks:
+
+- `1.506278..2.578287 s`, `15` URBs, `38410` bytes.
+- `3.618327..5.298298 s`, `25` URBs, `77140` bytes.
+- `6.498320..8.402274 s`, `25` URBs, `71310` bytes.
+- `9.042294..10.786281 s`, `25` URBs, `69881` bytes.
+- `11.906271..12.578268 s`, `11` URBs, `36659` bytes.
+
+Firmware counters after the same run:
+
+- `usbx_video_payload_flush_count_dbg = 0x91` (`145`).
+- `usbx_video_payload_flush_slots_dbg = 0x8`.
+- `usbx_video_payload_flush_nonzero_dbg = 0`.
+- `usbx_video_payload_flush_bytes_dbg = 0`.
+- `transfer_pos == access_pos == 0xd004c238`.
+
+Interpretation:
+
+- The USBX software payload queue was empty at every flush point, so stale committed software payloads are not the primary explanation.
+- The stream did recover several times, but pcap reconstruction shows bad UVC frame boundaries after some gaps:
+  - partial frames with SOI but no EOF/EOI;
+  - sizes not present in `stream1.h`, for example `7516`, `4193`, `6853`;
+  - at least one merged frame spans a long no-data gap with the same FID.
+- This means the remaining issue is not just "no payload"; recovery can return data, but the next visible UVC frame boundary/FID is sometimes wrong.
+
+Likely mechanism:
+
+- `FID` was toggled when a payload was committed, not when a packet was known to have completed on the bus.
+- If the first packet of a new UVC frame was committed and then lost, recovery reset `video_packet_index = 0`; the next payload toggled `FID` again.
+- Depending on whether the host saw any packet of the damaged frame, this can either repeat the previous visible FID or merge a partial old frame with the next frame.
+
+Change:
+
+- Replaced function-local static `fid` with explicit stream state `video_fid`.
+- Added completed-packet tracking:
+  - `video_done_packets_in_frame`;
+  - `usbx_video_done_packets_in_frame_dbg`;
+  - `usbx_video_last_done_header_dbg`.
+- On `VDON(length > 0)`, the callback reads the header byte from the just-completed payload slot and counts packets completed since the last EOF.
+- On `VRSY`:
+  - if packets from the damaged frame were completed, next FID is forced to the opposite of the last completed FID;
+  - if no packet from the damaged frame completed, next FID reuses the current committed FID instead of toggling twice.
+- Added watch variables:
+  - `usbx_video_fid_dbg`;
+  - `usbx_video_resync_next_fid_dbg`;
+  - `usbx_video_resync_fid_action_dbg` (`1` = retry same FID, `2` = opposite FID after partial frame);
+  - `usbx_video_resync_seen_packets_dbg`;
+  - `usbx_video_done_packets_in_frame_dbg`;
+  - `usbx_video_last_done_header_dbg`.
+- `VRSY` trace now uses:
+  - `a9 = usbx_video_resync_fid_action_dbg`;
+  - `a10 = usbx_video_resync_next_fid_dbg`;
+  - `a11 = packets seen before recovery`.
+
+Next run:
+
+- Check if pcap no longer has completed frames with repeated visible FID after recovery.
+- Check if large merged sizes across recovery gaps disappear.
+- If the stream still eventually hangs with clean FID boundaries, return focus to low-level EP1 ISO re-arm after `HAL_PCD_EP_Abort + USB_FlushTxFifo`.
+
+## 2026-04-30 22:20:05: FID change did not fix final IISO loop; EOF was delayed inside frame
+
+Fresh USBPcap:
+
+- File `C:\Users\Professional\Documents\UVC.pcapng`, size `19082124` bytes.
+- UVC device is USB address `15`.
+- `SET_INTERFACE alt=1`: frame `2470`, `1.395644 s`.
+- EP `0x81`: `10574` ISO rows, `88` non-zero rows, `252279` non-zero bytes.
+- First non-zero ISO data: frame `2632`, `1.481126 s`.
+- Last non-zero ISO data: frame `17388`, `11.625139 s`, `data_len = 2969`.
+
+Non-zero ISO data arrives in five blocks:
+
+- `1.481126..1.561149 s`, `2` URBs, `3286` bytes.
+- `2.681146..4.425124 s`, `21` URBs, `60057` bytes.
+- `5.465127..7.785137 s`, `33` URBs, `94298` bytes.
+- `8.665214..10.745158 s`, `30` URBs, `88085` bytes.
+- `11.545117..11.625139 s`, `2` URBs, `6553` bytes.
+
+Firmware trace:
+
+- The final trace is still a repeated low-level loop:
+  - `VCOM -> SUBM -> IISO/IREC -> DONE -> VDON(length=0) -> VRSY`.
+- `VRSY.a9 = 1`, `a10 = 1`, `a11 = 0`:
+  - recovery selected "same FID";
+  - no completed packet was seen in the damaged frame at the time of recovery.
+- Therefore the explicit FID state did not change the final failure mode.
+
+UVC reconstruction:
+
+- There are still partial frames with SOI but no EOF/EOI:
+  - sizes such as `1530`, `3060`, `3570`, `2550`, `4080`.
+- These sizes are multiples or near-multiples of the 510-byte payload capacity.
+- This points to an application-level pacing bug: the last packet of a frame was being delayed before it was committed.
+
+Root of the damaged-frame side effect:
+
+- `ux_utility_delay_ms(USBD_VIDEO_GetFramePeriodMs())` was inside the EOF-packet generation branch, before `ux_device_class_video_write_payload_commit()`.
+- That means the host could receive SOI and most of the JPEG, then wait one frame period before the EOF packet was even queued.
+- If ISO recovery happened during that wait, the current frame was dropped without EOF, producing exactly the partial frames seen in pcap.
+
+Change:
+
+- Moved frame pacing out of the EOF commit path.
+- EOF packet is now committed immediately.
+- A new `video_frame_delay_pending` flag delays only before the first payload of the next frame, after the previous EOF has completed.
+- Added watch variables:
+  - `usbx_video_frame_delay_pending_dbg`;
+  - `usbx_video_frame_delay_count_dbg`.
+
+Expected next run:
+
+- Partial frames ending just before EOF should drop sharply or disappear.
+- If stream still dies, the final loop is still low-level EP1 ISO scheduling/recovery, not UVC FID or JPEG frame pacing.
+
+## 2026-04-30 22:39:00: EOF pacing improved frames; final failure still leaves EP1 interrupt bits latched
+
+Fresh USBPcap:
+
+- File `C:\Users\Professional\Documents\UVC.pcapng`, size `13364024` bytes.
+- UVC device is USB address `17`.
+- `SET_INTERFACE alt=1`: frame `1723`, `1.218471 s`.
+- EP `0x81`: `8150` ISO URBs, `34` URBs with data, `1242` URBs with ISO errors.
+- Reconstructed UVC frames:
+  - `29` frame attempts;
+  - `23` complete frames with SOI/EOI/EOF;
+  - `6` partial frames without host-visible EOF/EOI.
+- Firmware counters match this direction:
+  - `usbx_video_frame_delay_count_dbg = 0x17` (`23`);
+  - `usbx_video_frame_eof_dbg = 0x1d` (`29`);
+  - `usbx_video_payload_done_dbg = 0x151`;
+  - `usbx_video_resync_count_dbg = 0x74`.
+
+Conclusion:
+
+- Moving the frame delay after EOF commit reduced the damaged-frame symptom substantially.
+- The final failure mode did not change:
+  - last host-visible frame is complete;
+  - after that `data_len = 0`;
+  - host sees repeated ISO `XACT_ERROR`;
+  - firmware trace loops through `VRSY -> VCOM/SUBM -> IISO/IREC`.
+
+New low-level clue:
+
+- Every failed `SUBM` after recovery still shows `DIEPINT = 0x2090`.
+- On STM32H7 OTG this is:
+  - `NAK`;
+  - `TXFE`;
+  - `ITTXFE` (`IN token received when TxFIFO is empty`).
+- Because `IISOIXFR` is masked and polled manually, the normal HAL IRQ path that clears IN EP interrupt bits is bypassed.
+
+Change:
+
+- In `USBX_RecoverMaskedIISOIXFR()` after `HAL_PCD_EP_Abort()` and `USB_FlushTxFifo()`:
+  - clear `hpcd_USB_OTG_HS.IN_ep[1].is_iso_incomplete`;
+  - clear EP1 from `DIEPEMPMSK`;
+  - clear latched EP1 `DIEPINT` bits: `EPDISD`, `TOC`, `ITTXFE`, `INEPNM`, `INEPNE`, `TXFE`, `PKTDRPSTS`, `NAK`.
+- Added watch variables:
+  - `usbx_iisoixfr_recovery_diepint_after_abort_dbg`;
+  - `usbx_iisoixfr_recovery_diepint_after_clear_dbg`;
+  - `usbx_iisoixfr_recovery_iso_flag_dbg`.
+
+Next run:
+
+- If this is the right missing cleanup, `SUBM.a8` should stop carrying stale `0x2090` after an `IREC`.
+- If `SUBM.a8` becomes clean but every next packet still gets `IISO`, endpoint abort/flush is not enough and the next experiment should be a harder EP1 reopen/reset after recovery.
+
+## 2026-04-30 22:55:00: DIEPINT cleanup changed symptoms but caused recovery loop
+
+Fresh trace after the explicit `DIEPINT` cleanup:
+
+- `usbx_iisoixfr_recovery_calls_dbg = 0x15b`.
+- `usbx_video_resync_count_dbg = 0x15b`.
+- `usbx_iisoixfr_recovery_diepint_dbg = 0x80`.
+- `usbx_iisoixfr_recovery_diepint_after_abort_dbg = 0xc0`.
+- `usbx_iisoixfr_recovery_diepint_after_clear_dbg = 0x80`.
+- `usbx_iisoixfr_recovery_iso_flag_dbg = 0`.
+
+Conclusion:
+
+- The cleanup removed the old `0x2090` pattern from the submit path, but it did not restore stable scheduling.
+- The stream now repeatedly does `VRSY -> VCOM/SUBM -> IISO/IREC` with no `DATI` between attempts.
+- `TXFE` (`0x80`) alone is not a convincing root cause; the remaining suspect is still the first ISO IN arm after recovery.
+
+Change:
+
+- `DIEPINT` clearing is now gated by `usbx_iisoixfr_recovery_clear_diepint_enable_dbg`, default `0`.
+- Recovery now sets `usb_ll_iso_after_recovery_dbg = 1`.
+- `USB_EPStartXfer()` consumes that flag only for the next EP1 ISO IN packet with non-zero length.
+- Added one-shot recovery mode:
+  - `usb_ll_iso_recovery_mode_dbg = 1` by default: schedule the same odd/even parity only for the first submit after recovery.
+  - bit `1`: same-parity scheduling after recovery.
+  - bit `2`: write FIFO before `EPENA` after recovery.
+  - `usb_ll_iso_recovery_mode_used_dbg` records the last consumed mode.
+  - `usb_ll_iso_recovery_mode_consumed_dbg` counts consumed recovery submits.
+
+Next run:
+
+- If this is a recovery-only odd/even issue, the first packet after `VRSY` should stop going immediately to `IISO`.
+- If it still loops, try `set var usb_ll_iso_recovery_mode_dbg=2` before starting the stream to test recovery-only FIFO prewrite without same-parity.
+
+## 2026-04-30 23:05:00: recovery-only same parity keeps device alive, but VRSY delay dominates
+
+Fresh USBPcap after one-shot recovery same-parity:
+
+- File `C:\Users\Professional\Documents\UVC.pcapng`, size `48983908` bytes.
+- UVC stream is USB address `29`, EP `0x81`.
+- Last non-zero EP81 data is at `58.787956 s`, so the device no longer dies quickly.
+- EP81 summary:
+  - `24736` URBs;
+  - `141` URBs with data;
+  - `2927` URBs with ISO errors;
+  - `142945` data bytes.
+- Data arrives in `35` separated islands.
+- Inter-island gaps:
+  - average about `1.4 s`;
+  - maximum `2.656 s`.
+
+UVC reconstruction:
+
+- `283` host-visible UVC payload packets.
+- `132` frame attempts.
+- Only `7` complete JPEG+EOF frames.
+- `125` partial attempts, mostly:
+  - `510` bytes;
+  - `1020` bytes;
+  - `1530` bytes;
+  - `2040` bytes.
+
+Interpretation:
+
+- Recovery-only same-parity is directionally useful: the device can return data for almost a minute.
+- But recovery is still frequent, usually after only the first few UVC payload packets.
+- The class recovery path currently waits one full UVC frame period (`0x50 ms`) on every `VRSY`.
+- Multiple consecutive low-level misses therefore turn into visible `1..2.6 s` stalls.
+
+Change:
+
+- Added `usbx_video_resync_delay_cfg_ms_dbg`, default `1`.
+- `VRSY` now uses this short configurable delay instead of `USBD_VIDEO_GetFramePeriodMs()`.
+- The normal clean-frame pacing after EOF is unchanged.
+- `usbx_video_resync_delay_ms_dbg` still records the actual VRSY delay used.
+
+Next run:
+
+- If the same low-level misses continue, `resync_count` may still grow, but visual recovery should be much faster.
+- If immediate resubmission makes the low-level loop worse, set `set var usbx_video_resync_delay_cfg_ms_dbg=0x50` to restore the old full-frame delay without reflashing.
+
+## 2026-04-30 23:12:00: same-parity after recovery is consumed, but does not reduce miss rate
+
+Firmware counters after the recovery-only same-parity run:
+
+- `usb_ll_iso_after_recovery_dbg = 1`.
+- `usb_ll_iso_recovery_mode_dbg = 1`.
+- `usb_ll_iso_recovery_mode_used_dbg = 1`.
+- `usb_ll_iso_recovery_mode_consumed_dbg = 0x371`.
+- `usbx_iisoixfr_recovery_calls_dbg = 0x372`.
+- `usbx_video_resync_count_dbg = 0x372`.
+- `usb_ll_iso_write_pre_enable_used_dbg = 0`.
+- `usbx_iisoixfr_recovery_clear_diepint_enable_dbg = 0`.
+
+Interpretation:
+
+- The one-shot hook is working: nearly every recovery is followed by a non-zero EP1 ISO submit that consumes recovery mode.
+- The final `usb_ll_iso_after_recovery_dbg = 1` means the last recovery set the flag and no later non-zero submit consumed it.
+- Same-parity after recovery is therefore not enough; it keeps the stream alive longer but still produces a high miss/recovery rate.
+
+Change:
+
+- Default `usb_ll_iso_recovery_mode_dbg` changed from `1` to `2`.
+- Next experiment is recovery-only FIFO prewrite:
+  - normal stream start still uses the old order;
+  - only the first non-zero EP1 ISO submit after `IREC` writes FIFO before `EPENA`;
+  - odd/even scheduling returns to the normal opposite-parity path.
+
+Next run:
+
+- If `usb_ll_iso_write_pre_enable_used_dbg` grows with `usb_ll_iso_recovery_mode_consumed_dbg`, the new mode is being exercised.
+- A useful result would be lower `usbx_iisoixfr_recovery_calls_dbg` per second and more complete JPEG+EOF frames.
+
+## 2026-04-30 23:18:00: recovery-only FIFO prewrite breaks stream start
+
+Fresh USBPcap after `usb_ll_iso_recovery_mode_dbg = 2`:
+
+- File `C:\Users\Professional\Documents\UVC.pcapng`, size `2538836` bytes.
+- UVC stream is USB address `38`, EP `0x81`.
+- `SET_INTERFACE` for the camera is at `1.576094 s`.
+- EP81 after stream start:
+  - `96` non-zero IN transfers;
+  - `1671` total data bytes;
+  - maximum data length `42` bytes;
+  - `0` transfers larger than `100` bytes;
+  - `50` tiny fragments end in `FF D9`.
+
+Firmware counters from the same run:
+
+- `usb_ll_iso_recovery_mode_dbg = 2`.
+- `usb_ll_iso_recovery_mode_used_dbg = 2`.
+- `usb_ll_iso_recovery_mode_consumed_dbg = 0x2404`.
+- `usb_ll_iso_write_pre_enable_used_dbg = 0x2404`.
+- `usbx_iisoixfr_recovery_calls_dbg = 0x2405`.
+- `usbx_video_resync_count_dbg = 0x2405`.
+
+Interpretation:
+
+- Mode 2 was definitely exercised on nearly every recovery.
+- The firmware `SUBM` trace still shows the intended start payload (`02 00 FF D8 FF E0 ...`).
+- The host instead receives only very short JPEG tail fragments, often ending in `FF D9`.
+- Writing FIFO before `EPENA` after recovery therefore releases stale/tail data or arms the endpoint in a bad order.
+
+Change:
+
+- Default `usb_ll_iso_recovery_mode_dbg` changed back from `2` to `1`.
+- Keep mode 2 available only as a manual GDB experiment; it should not be the normal boot default.
+
+## 2026-05-01: hard stop is an EP81 no-DATAIN lock, not a frame-content problem
+
+Latest USBX run and USBPcap:
+
+- UVC device address in pcap is `14`.
+- The camera has only one `SET_INTERFACE` to stream alt `1` at `2.170144 s`; there is no later host alt-0 stop for this device.
+- Last non-zero EP81 DATA IN in pcap is at `59.215675 s`.
+- Firmware keeps running with `video_last_alt = 1`, `stream_task_state = 0x21`, and continues `VCOM/SUBM/ISOI/DONE/VPAC`.
+- `usbx_ep81_last_datain_tick_dbg = 0x12beb`, while submit/done/isoinc advanced to `0x1467b`, so the endpoint spent about `0x1a90` ms (~6.8 s) with no real DATA IN.
+- `usbx_dcd_iso_incomplete_calls_dbg == usbx_iisoixfr_recovery_calls_dbg == 0x31f`: every incomplete ISO IN is being turned into a zero-length completion, but the hardware endpoint never resumes real data.
+
+Interpretation:
+
+- The final stream death is the same failure mode seen before: EP81 falls into a persistent submit -> ISO incomplete -> fake DONE loop.
+- This is independent of whether the frames are good or broken; payload generation still runs, USBX tasks still run, and the host did not request stream stop.
+
+Change:
+
+- Added an EP81 hard recovery path driven only by the `E8ID` watchdog condition.
+- On persistent no-DATAIN while submit/ISOI continue, firmware now logs `FRZE`, schedules `HREC`, aborts/flushes/closes/reopens only endpoint `0x81`, clears the HAL/DCD transfer state, and lets the video task submit again.
+- New debug variables: `usbx_ep81_hard_recovery_*`.

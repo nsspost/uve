@@ -753,7 +753,7 @@ static void USBD_FrameWork_VIDEO_Desc(USBD_DevClassHandleTypeDef *pdev,
   pVideoPayForDesc->bDescriptorSubType = UX_DEVICE_CLASS_VIDEO_VS_FORMAT_MJPEG;
   pVideoPayForDesc->bFormatIndex = 0x01U;
   pVideoPayForDesc->bNumFrameDescriptors = 0x01U;
-  pVideoPayForDesc->bmFlags = 0x01U;
+  pVideoPayForDesc->bmFlags = 0x00U;
   pVideoPayForDesc->bDefaultFrameIndex = 0x01U;
   pVideoPayForDesc->bAspectRatioX = 0x00U;
   pVideoPayForDesc->bAspectRatioY = 0x00U;
@@ -775,17 +775,17 @@ static void USBD_FrameWork_VIDEO_Desc(USBD_DevClassHandleTypeDef *pdev,
 
   if (pdev->Speed == (uint8_t)USBD_HIGH_SPEED)
   {
-    pVideoFrameDesc->dwMinBitRate = UVC_MIN_BIT_RATE(UVC_CAM_FPS_HS);
-    pVideoFrameDesc->dwMaxBitRate = UVC_MAX_BIT_RATE(UVC_CAM_FPS_HS);
-    pVideoFrameDesc->dwDefaultFrameInterval = UVC_INTERVAL(UVC_CAM_FPS_HS);
-    pVideoFrameDesc->dwFrameInterval = UVC_INTERVAL(UVC_CAM_FPS_HS);
+    pVideoFrameDesc->dwMinBitRate = UVC_BIT_RATE_FROM_INTERVAL(UVC_FRAME_INTERVAL_HS);
+    pVideoFrameDesc->dwMaxBitRate = UVC_BIT_RATE_FROM_INTERVAL(UVC_FRAME_INTERVAL_HS);
+    pVideoFrameDesc->dwDefaultFrameInterval = UVC_FRAME_INTERVAL_HS;
+    pVideoFrameDesc->dwFrameInterval = UVC_FRAME_INTERVAL_HS;
   }
   else
   {
-    pVideoFrameDesc->dwMinBitRate = UVC_MIN_BIT_RATE(UVC_CAM_FPS_FS);
-    pVideoFrameDesc->dwMaxBitRate = UVC_MAX_BIT_RATE(UVC_CAM_FPS_FS);
-    pVideoFrameDesc->dwDefaultFrameInterval = UVC_INTERVAL(UVC_CAM_FPS_FS);
-    pVideoFrameDesc->dwFrameInterval = UVC_INTERVAL(UVC_CAM_FPS_FS);
+    pVideoFrameDesc->dwMinBitRate = UVC_BIT_RATE_FROM_INTERVAL(UVC_FRAME_INTERVAL_FS);
+    pVideoFrameDesc->dwMaxBitRate = UVC_BIT_RATE_FROM_INTERVAL(UVC_FRAME_INTERVAL_FS);
+    pVideoFrameDesc->dwDefaultFrameInterval = UVC_FRAME_INTERVAL_FS;
+    pVideoFrameDesc->dwFrameInterval = UVC_FRAME_INTERVAL_FS;
   }
 
   pVideoFrameDesc->dwMaxVideoFrameBufferSize = UVC_MAX_FRAME_SIZE;
