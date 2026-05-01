@@ -29,16 +29,6 @@
 #include "ux_dcd_stm32.h"
 #include "ux_device_stack.h"
 #include "ux_utility.h"
-#include "app_usbx_device.h"
-
-volatile ULONG usbx_dcd_data_in_calls_dbg = 0UL;
-volatile ULONG usbx_dcd_data_in_ep_dbg = 0UL;
-volatile ULONG usbx_dcd_data_in_req_len_dbg = 0UL;
-volatile ULONG usbx_dcd_iso_incomplete_calls_dbg = 0UL;
-volatile ULONG usbx_dcd_iso_incomplete_ep_dbg = 0UL;
-volatile ULONG usbx_dcd_iso_incomplete_retry_calls_dbg = 0UL;
-volatile ULONG usbx_dcd_iso_incomplete_retry_status_dbg = 0UL;
-volatile ULONG usbx_dcd_iso_incomplete_retry_len_dbg = 0UL;
 
 
 static inline void _ux_dcd_stm32_setup_in(UX_DCD_STM32_ED * ed, UX_SLAVE_TRANSFER *transfer_request)
@@ -410,9 +400,6 @@ ULONG                   transfer_length;
 UX_SLAVE_ENDPOINT       *endpoint;
 
 
-    usbx_dcd_data_in_calls_dbg++;
-    usbx_dcd_data_in_ep_dbg = epnum;
-
     /* Get the pointer to the DCD.  */
     dcd =  &_ux_system_slave -> ux_system_slave_dcd;
 
@@ -429,26 +416,6 @@ UX_SLAVE_ENDPOINT       *endpoint;
 
     /* Get the pointer to the transfer request.  */
     transfer_request =  &(ed -> ux_dcd_stm32_ed_endpoint -> ux_slave_endpoint_transfer_request);
-    usbx_dcd_data_in_req_len_dbg = transfer_request -> ux_slave_transfer_request_requested_length;
-    if ((epnum & 0x0FU) == 1U)
-    {
-        uint32_t USBx_BASE = (uint32_t)hpcd -> Instance;
-        uint8_t in_ep = (uint8_t)(epnum & 0x0FU);
-
-        USBX_TraceLog(USBX_TRACE_EVT_DCD_DATAIN,
-                      epnum,
-                      usbx_dcd_data_in_req_len_dbg,
-                      hpcd -> IN_ep[in_ep].xfer_len,
-                      hpcd -> IN_ep[in_ep].xfer_count,
-                      USBx_DEVICE -> DSTS,
-                      USBx_INEP(in_ep) -> DIEPCTL,
-                      USBx_INEP(in_ep) -> DIEPTSIZ,
-                      USBx_INEP(in_ep) -> DIEPINT,
-                      USBx_INEP(in_ep) -> DTXFSTS,
-                      ed -> ux_dcd_stm32_ed_status,
-                      usbx_dcd_data_in_calls_dbg,
-                      transfer_request -> ux_slave_transfer_request_status);
-    }
 
     /* Endpoint 0 is different.  */
     if (epnum == 0U)
@@ -1104,7 +1071,7 @@ void HAL_PCD_SOFCallback(PCD_HandleTypeDef *hpcd)
 /*                                                                        */
 /*  CALLS                                                                 */
 /*                                                                        */
-/*    USBX_TraceLog                         Trace incomplete transfer     */
+/*    _ux_device_stack_transfer_run          Process transfer completion   */
 /*                                                                        */
 /*  CALLED BY                                                             */
 /*                                                                        */
@@ -1125,11 +1092,8 @@ UX_DCD_STM32_ED         *ed;
 UX_SLAVE_ENDPOINT       *endpoint;
 UX_SLAVE_TRANSFER       *transfer_request;
 ULONG                   ed_status;
-uint32_t                USBx_BASE;
 
-    UX_PARAMETER_NOT_USED(epnum);
-    usbx_dcd_iso_incomplete_calls_dbg++;
-    usbx_dcd_iso_incomplete_ep_dbg = epnum;
+    UX_PARAMETER_NOT_USED(hpcd);
 
     /* Get the pointer to the DCD.  */
     dcd =  &_ux_system_slave -> ux_system_slave_dcd;
@@ -1146,24 +1110,10 @@ uint32_t                USBx_BASE;
     ed_status = ed -> ux_dcd_stm32_ed_status;
     if ((ed_status & UX_DCD_STM32_ED_STATUS_USED) == 0U)
     {
-        USBX_TraceLog(USBX_TRACE_EVT_DCD_ISOINC,
-                      epnum,
-                      0UL,
-                      ed_status,
-                      usbx_dcd_iso_incomplete_calls_dbg,
-                      0UL,
-                      0UL,
-                      0UL,
-                      0UL,
-                      0UL,
-                      0UL,
-                      0UL,
-                      0UL);
         return;
     }
 
     endpoint = ed->ux_dcd_stm32_ed_endpoint;
-    USBx_BASE = (uint32_t)hpcd -> Instance;
 
     if ((endpoint != UX_NULL) &&
         ((endpoint->ux_slave_endpoint_descriptor.bmAttributes & UX_MASK_ENDPOINT_TYPE) == 1) &&
@@ -1172,10 +1122,6 @@ uint32_t                USBx_BASE;
         transfer_request = &endpoint->ux_slave_endpoint_transfer_request;
 
         /* Incomplete ISO IN means this payload is lost. Do not resend it. */
-        usbx_dcd_iso_incomplete_retry_len_dbg =
-            transfer_request->ux_slave_transfer_request_requested_length;
-        usbx_dcd_iso_incomplete_retry_status_dbg = 0UL;
-
         if (((ed_status & UX_DCD_STM32_ED_STATUS_TRANSFER) != 0U) &&
             ((ed_status & UX_DCD_STM32_ED_STATUS_DONE) == 0U))
         {
@@ -1188,25 +1134,7 @@ uint32_t                USBx_BASE;
 #else
             _ux_utility_semaphore_put(&transfer_request -> ux_slave_transfer_request_semaphore);
 #endif
-
-            usbx_iisoixfr_recovery_calls_dbg++;
-            usbx_video_iso_recovery_pending_dbg++;
-            usb_ll_iso_after_recovery_dbg = 1U;
         }
-
-        USBX_TraceLog(USBX_TRACE_EVT_DCD_ISOINC,
-                      epnum,
-                      usbx_dcd_iso_incomplete_retry_len_dbg,
-                      usbx_dcd_iso_incomplete_retry_status_dbg,
-                      USBx_DEVICE -> DSTS,
-                      USBx_INEP(epnum & 0x0FU) -> DIEPCTL,
-                      USBx_INEP(epnum & 0x0FU) -> DIEPTSIZ,
-                      USBx_INEP(epnum & 0x0FU) -> DIEPINT,
-                      USBx_INEP(epnum & 0x0FU) -> DTXFSTS,
-                      ed_status,
-                      usbx_dcd_iso_incomplete_calls_dbg,
-                      usbx_iisoixfr_recovery_calls_dbg,
-                      endpoint->ux_slave_endpoint_descriptor.bEndpointAddress);
     }
 }
 

@@ -48,7 +48,6 @@ volatile uint32_t fault_dfsr = 0;
 volatile uint32_t fault_afsr = 0;
 volatile uint32_t fault_bfar = 0;
 volatile uint32_t fault_mmfar = 0;
-volatile uint32_t systick_irq_calls_dbg = 0;
 
 /* USER CODE END PV */
 
@@ -222,7 +221,6 @@ void PendSV_Handler(void)
 void SysTick_Handler(void)
 {
   /* USER CODE BEGIN SysTick_IRQn 0 */
-  systick_irq_calls_dbg++;
 
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
@@ -230,7 +228,6 @@ void SysTick_Handler(void)
 
   /* USER CODE END SysTick_IRQn 1 */
 }
-extern uint32_t usb_irq_calls;
 /******************************************************************************/
 /* STM32H7xx Peripheral Interrupt Handlers                                    */
 /* Add here the Interrupt Handlers for the used peripherals.                  */
@@ -246,7 +243,6 @@ void OTG_HS_IRQHandler(void)
   /* USER CODE BEGIN OTG_HS_IRQn 0 */
 
   /* USER CODE END OTG_HS_IRQn 0 */
-    usb_irq_calls++;
     HAL_PCD_IRQHandler(&hpcd_USB_OTG_HS);
   /* USER CODE BEGIN OTG_HS_IRQn 1 */
 
@@ -261,7 +257,6 @@ void OTG_FS_IRQHandler(void)
   /* USER CODE BEGIN OTG_FS_IRQn 0 */
 
   /* USER CODE END OTG_FS_IRQn 0 */
-    usb_irq_calls++;
     HAL_PCD_IRQHandler(&hpcd_USB_OTG_HS);
   /* USER CODE BEGIN OTG_FS_IRQn 1 */
 
