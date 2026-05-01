@@ -41,7 +41,7 @@ static uint8_t uvc_jpeg_pool[JPEG_POOL_COUNT][JPEG_BUF_SIZE]
     __attribute__((section(".xsdram"), aligned(32)));
 static uint8_t jpeg_fill_index = 0U;
 
-/* ===== Debug ===== */
+/* ===== Runtime state ===== */
 
 volatile uint32_t camera_pipeline_updates = 0;
 volatile uint32_t camera_pipeline_before_encode = 0;
@@ -55,15 +55,12 @@ volatile uint32_t camera_pipeline_skip_pending = 0;
 volatile uint32_t camera_pipeline_skip_no_free_jpeg_buf = 0;
 volatile uint32_t camera_pipeline_skip_oversize_jpeg = 0;
 volatile uint32_t camera_pipeline_max_submit_jpeg_size = UVC_MAX_FRAME_SIZE;
-volatile uint32_t camera_pipeline_force_test_jpeg = 1;
+volatile uint32_t camera_pipeline_force_test_jpeg = 0;
 volatile uint32_t camera_pipeline_test_submit_ok = 0;
 volatile uint32_t camera_pipeline_test_frame_mode = 2U;
 volatile uint32_t camera_pipeline_test_next_frame = 0U;
 volatile uint32_t camera_pipeline_test_last_frame = 0U;
-volatile uint32_t camera_pipeline_jpeg_fill_index_dbg = 0;
 volatile uint32_t camera_pipeline_period_ms = UVC_PRODUCER_INTERVAL_MS;
-volatile uint32_t camera_pipeline_uvc_w_dbg = UVC_W;
-volatile uint32_t camera_pipeline_uvc_h_dbg = UVC_H;
 volatile uint32_t camera_pipeline_last_update_tick = 0;
 volatile uint32_t camera_pipeline_last_encode_start_tick = 0;
 volatile uint32_t camera_pipeline_last_encode_ms = 0;
@@ -75,28 +72,13 @@ volatile uint32_t camera_pipeline_last_submit_fail_tick = 0;
 volatile uint32_t camera_pipeline_last_oversize_jpeg_size = 0;
 volatile uint32_t camera_pipeline_last_oversize_tick = 0;
 
-volatile uint32_t dbg_submit_calls = 0;
-volatile uint32_t dbg_submit_fail = 0;
-
-/* framebuffer sampling debug */
-volatile uint16_t dbg_fb_sample_0 = 0;
-volatile uint16_t dbg_fb_sample_1 = 0;
-volatile uint16_t dbg_uvc_sample_0 = 0;
-volatile uint16_t dbg_uvc_sample_1 = 0;
-volatile uint32_t dbg_fb_checksum = 0;
-
-/* phase marker for visual verification */
+/* Frame sequence for fallback/test mode. */
 volatile uint32_t camera_pipeline_frame_id = 0;
 
 /* ===== Внутренние функции ===== */
 
 static void uvc_frame_prepare_from_ltdc(void)
 {
-    uint32_t sum = 0U;
-
-    dbg_fb_sample_0 = fb[0];
-    dbg_fb_sample_1 = fb[100];
-
     /*
      * Downsample LCD framebuffer to the UVC/JPEG frame size.
      */
@@ -112,30 +94,8 @@ static void uvc_frame_prepare_from_ltdc(void)
             uint16_t px = fb[src_row + src_x];
 
             uvc_rgb565[dst_row + x] = px;
-            sum += px;
         }
     }
-
-    /*
-     * Небольшой "штамп" в левом верхнем углу, чтобы было видно обновление кадра.
-     * Он меняется каждый раз, когда pipeline реально готовит новый JPEG.
-     * Если не нужен, потом легко убрать.
-     */
-    {
-        uint16_t stamp_color = (camera_pipeline_frame_id & 1U) ? 0xF800U : 0x07E0U;
-
-        for (uint32_t y = 0; y < 12U; y++)
-        {
-            for (uint32_t x = 0; x < 12U; x++)
-            {
-                uvc_rgb565[y * UVC_W + x] = stamp_color;
-            }
-        }
-    }
-
-    dbg_uvc_sample_0 = uvc_rgb565[0];
-    dbg_uvc_sample_1 = uvc_rgb565[100];
-    dbg_fb_checksum = sum;
 }
 
 void camera_pipeline_init(void)
@@ -155,7 +115,6 @@ static uint8_t *camera_pipeline_get_free_jpeg_buf(void)
         if (!video_source_buffer_in_use(uvc_jpeg_pool[idx]))
         {
             jpeg_fill_index = (uint8_t)idx;
-            camera_pipeline_jpeg_fill_index_dbg = idx;
             return uvc_jpeg_pool[idx];
         }
     }
@@ -233,7 +192,7 @@ void camera_pipeline_update(void)
         }
         else
         {
-            dbg_submit_fail++;
+            camera_pipeline_last_submit_fail_tick = HAL_GetTick();
         }
 
         return;
@@ -292,8 +251,6 @@ void camera_pipeline_update(void)
         return;
     }
 
-    dbg_submit_calls++;
-
     if (video_source_submit_frame(dst_buf, jpeg_size))
     {
         camera_pipeline_submit_ok++;
@@ -302,12 +259,10 @@ void camera_pipeline_update(void)
         jpeg_fill_index++;
         if (jpeg_fill_index >= JPEG_POOL_COUNT)
             jpeg_fill_index = 0U;
-        camera_pipeline_jpeg_fill_index_dbg = jpeg_fill_index;
         last_tick = now;
     }
     else
     {
-        dbg_submit_fail++;
         camera_pipeline_last_submit_fail_tick = HAL_GetTick();
     }
 }

@@ -358,14 +358,14 @@ uint16_t USBD_Get_Configuration_Number(uint8_t class_type, uint8_t interface_typ
 
 /* Device VIDEO Class */
 #define USBD_VIDEO_EPIN_ADDR                          0x81U
-#define USBD_VIDEO_EPIN_FS_MPS                        300U
+#define USBD_VIDEO_EPIN_FS_MPS                        512U
 #define USBD_VIDEO_EPIN_HS_MPS                        512U
 #define USBD_VIDEO_EPIN_FS_BINTERVAL                  1U
 #define USBD_VIDEO_EPIN_HS_BINTERVAL                  1U
 
-#define UVC_FRAME_WIDTH                               320U
-#define UVC_FRAME_HEIGHT                              236U
-#define UVC_FRAME_PERIOD_FS_MS                        100U
+#define UVC_FRAME_WIDTH                               160U
+#define UVC_FRAME_HEIGHT                              120U
+#define UVC_FRAME_PERIOD_FS_MS                        33U
 #define UVC_FRAME_PERIOD_HS_MS                        80U
 
 #define UVC_INTERVAL_FROM_PERIOD_MS(n)                ((n) * 10000U)

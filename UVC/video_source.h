@@ -19,18 +19,3 @@ bool video_source_prepare_next_frame(bool *repeated);
 bool video_source_can_accept_frame(void);
 bool video_source_has_current_frame(void);
 bool video_source_buffer_in_use(const uint8_t *data);
-
-/* debug */
-extern volatile const uint8_t *dbg_current_frame_ptr;
-extern volatile const uint8_t *dbg_pending_frame_ptr;
-extern volatile uint32_t dbg_current_frame_size;
-extern volatile uint32_t dbg_pending_frame_size;
-extern volatile uint32_t dbg_commit_calls;
-extern volatile uint32_t dbg_pending_valid_before;
-extern volatile uint32_t dbg_pending_valid_after;
-extern volatile uint32_t dbg_prepare_next_calls;
-extern volatile uint32_t dbg_repeat_current_calls;
-extern volatile uint32_t dbg_submit_reject_bad_jpeg;
-extern volatile uint32_t dbg_submit_last_size;
-extern volatile uint32_t dbg_submit_head;
-extern volatile uint32_t dbg_submit_tail;

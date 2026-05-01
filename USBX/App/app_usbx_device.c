@@ -16,10 +16,30 @@ extern volatile uint32_t usb_ll_iso_after_recovery_dbg;
 
 #define USBX_DEVICE_MEMORY_STACK_SIZE (64U * 1024U)
 
+#define USBX_DEVICE_USE_OTG_FS 1U
+
+#if (USBX_DEVICE_USE_OTG_FS != 0U)
+#define USBX_DEVICE_USB_INSTANCE USB_OTG_FS
+#define USBX_DEVICE_PCD_SPEED PCD_SPEED_FULL
+#define USBX_DEVICE_PHY_ITFACE USB_OTG_EMBEDDED_PHY
+#define USBX_DEVICE_RX_FIFO_WORDS 0x80U
+#define USBX_DEVICE_TX0_FIFO_WORDS 0x40U
+#define USBX_DEVICE_TX1_FIFO_WORDS 0x80U
+#else
+#define USBX_DEVICE_USB_INSTANCE USB_OTG_HS
+#define USBX_DEVICE_PCD_SPEED PCD_SPEED_HIGH
+#define USBX_DEVICE_PHY_ITFACE USB_OTG_ULPI_PHY
+#define USBX_DEVICE_RX_FIFO_WORDS 0x80U
+#define USBX_DEVICE_TX0_FIFO_WORDS 0x40U
+#define USBX_DEVICE_TX1_FIFO_WORDS 0x300U
+#endif
+
 #if defined(__GNUC__)
 #define USBX_DEBUG_RETAIN __attribute__((used))
+#define USBX_UNUSED_FUNC __attribute__((unused))
 #else
 #define USBX_DEBUG_RETAIN
+#define USBX_UNUSED_FUNC
 #endif
 
 __attribute__((section(".xsdram"), aligned(32)))
@@ -31,7 +51,7 @@ static uint8_t usbx_initialized;
 
 __attribute__((used, aligned(4)))
 volatile USBX_TRACE_ENTRY usbx_trace_log[USBX_TRACE_DEPTH];
-volatile ULONG usbx_trace_enable_dbg = 1UL;
+volatile ULONG usbx_trace_enable_dbg = 0UL;
 volatile ULONG usbx_trace_wr_idx_dbg = 0UL;
 volatile ULONG usbx_trace_seq_dbg = 0UL;
 volatile ULONG usbx_trace_last_idx_dbg = 0UL;
@@ -39,7 +59,7 @@ volatile ULONG usbx_trace_last_event_dbg = 0UL;
 volatile ULONG usbx_trace_iiso_suppressed_dbg = 0UL;
 
 USBX_DEBUG_RETAIN volatile USBX_FREEZE_SNAPSHOT usbx_freeze_snapshot_dbg;
-volatile ULONG usbx_freeze_enable_dbg = 1UL;
+volatile ULONG usbx_freeze_enable_dbg = 0UL;
 volatile ULONG usbx_freeze_timeout_ms_dbg = 250UL;
 volatile ULONG usbx_freeze_poll_period_ms_dbg = 10UL;
 volatile ULONG usbx_freeze_count_dbg = 0UL;
@@ -50,7 +70,7 @@ volatile ULONG usbx_freeze_progress_event_dbg = 0UL;
 volatile ULONG usbx_freeze_last_poll_tick_dbg = 0UL;
 volatile ULONG usbx_freeze_last_elapsed_dbg = 0UL;
 volatile ULONG usbx_freeze_alt0_capture_enable_dbg = 0UL;
-volatile ULONG usbx_ep81_watchdog_enable_dbg = 1UL;
+volatile ULONG usbx_ep81_watchdog_enable_dbg = 0UL;
 volatile ULONG usbx_ep81_watchdog_timeout_ms_dbg = 3000UL;
 volatile ULONG usbx_ep81_stream_start_tick_dbg = 0UL;
 volatile ULONG usbx_ep81_last_submit_tick_dbg = 0UL;
@@ -62,7 +82,7 @@ volatile ULONG usbx_ep81_last_irec_tick_dbg = 0UL;
 volatile ULONG usbx_ep81_last_payload_done_tick_dbg = 0UL;
 volatile ULONG usbx_ep81_idle_elapsed_dbg = 0UL;
 volatile ULONG usbx_ep81_idle_count_dbg = 0UL;
-volatile ULONG usbx_ep81_hard_recovery_enable_dbg = 1UL;
+volatile ULONG usbx_ep81_hard_recovery_enable_dbg = 0UL;
 volatile ULONG usbx_ep81_hard_recovery_pending_dbg = 0UL;
 volatile ULONG usbx_ep81_hard_recovery_count_dbg = 0UL;
 volatile ULONG usbx_ep81_hard_recovery_skip_dbg = 0UL;
@@ -113,7 +133,7 @@ volatile ULONG usbx_iisoixfr_poll_first_diepctl_dbg = 0UL;
 volatile ULONG usbx_iisoixfr_poll_first_dieptsiz_dbg = 0UL;
 volatile ULONG usbx_iisoixfr_poll_first_diepint_dbg = 0UL;
 volatile ULONG usbx_iisoixfr_poll_first_dtxfsts_dbg = 0UL;
-volatile ULONG usbx_iisoixfr_recovery_enable_dbg = 1UL;
+volatile ULONG usbx_iisoixfr_recovery_enable_dbg = 0UL;
 volatile ULONG usbx_iisoixfr_recovery_calls_dbg = 0UL;
 volatile ULONG usbx_iisoixfr_recovery_skip_dbg = 0UL;
 volatile ULONG usbx_iisoixfr_recovery_abort_status_dbg = 0UL;
@@ -147,7 +167,7 @@ static uint32_t USBX_FreezeIsProgressEvent(ULONG event);
 static void USBX_FreezeMarkProgress(ULONG event, ULONG seq, ULONG tick);
 static void USBX_Ep81TraceMark(ULONG event, ULONG seq, ULONG tick, ULONG a0);
 static void USBX_Ep81WatchdogPollAt(ULONG now_tick);
-static void USBX_Ep81HardRecoveryPoll(void);
+static void USBX_UNUSED_FUNC USBX_Ep81HardRecoveryPoll(void);
 static void USBX_FreezeCapture(ULONG reason, ULONG now_tick);
 static void USBX_FreezePollAt(ULONG now_tick, ULONG reason);
 
@@ -483,7 +503,7 @@ static void USBX_Ep81WatchdogPollAt(ULONG now_tick)
     }
 }
 
-static void USBX_Ep81HardRecoveryPoll(void)
+static void USBX_UNUSED_FUNC USBX_Ep81HardRecoveryPoll(void)
 {
     UX_INTERRUPT_SAVE_AREA
     UX_SLAVE_DCD *dcd;
@@ -1087,7 +1107,7 @@ static void USBX_RecoverMaskedIISOIXFR(void)
                   usbx_iisoixfr_poll_count_dbg);
 }
 
-static void USBX_PollMaskedIISOIXFR(void)
+static void USBX_UNUSED_FUNC USBX_PollMaskedIISOIXFR(void)
 {
     USB_OTG_GlobalTypeDef *USBx = hpcd_USB_OTG_HS.Instance;
     uint32_t gintsts;
@@ -1114,12 +1134,12 @@ static UINT USBX_PCD_Init(void)
 {
     memset(&hpcd_USB_OTG_HS, 0, sizeof(hpcd_USB_OTG_HS));
 
-    hpcd_USB_OTG_HS.Instance = USB_OTG_HS;
+    hpcd_USB_OTG_HS.Instance = USBX_DEVICE_USB_INSTANCE;
     hpcd_USB_OTG_HS.Init.dev_endpoints = 4;
     hpcd_USB_OTG_HS.Init.ep0_mps = 0x40;
-    hpcd_USB_OTG_HS.Init.speed = PCD_SPEED_HIGH;
+    hpcd_USB_OTG_HS.Init.speed = USBX_DEVICE_PCD_SPEED;
     hpcd_USB_OTG_HS.Init.dma_enable = DISABLE;
-    hpcd_USB_OTG_HS.Init.phy_itface = USB_OTG_ULPI_PHY;
+    hpcd_USB_OTG_HS.Init.phy_itface = USBX_DEVICE_PHY_ITFACE;
     hpcd_USB_OTG_HS.Init.Sof_enable = ENABLE;
     hpcd_USB_OTG_HS.Init.low_power_enable = DISABLE;
     hpcd_USB_OTG_HS.Init.lpm_enable = DISABLE;
@@ -1134,9 +1154,9 @@ static UINT USBX_PCD_Init(void)
 
     USBX_MaskIISOIXFRIfEnabled();
 
-    HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_HS, 0x80);
-    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_HS, 0, 0x40);
-    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_HS, 1, 0x300);
+    HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_HS, USBX_DEVICE_RX_FIFO_WORDS);
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_HS, 0, USBX_DEVICE_TX0_FIFO_WORDS);
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_HS, 1, USBX_DEVICE_TX1_FIFO_WORDS);
 
     return UX_SUCCESS;
 }
@@ -1241,7 +1261,7 @@ UINT MX_USBX_Device_Init(void)
         return status;
     }
 
-    status = ux_dcd_stm32_initialize((ULONG)USB_OTG_HS, (ULONG)&hpcd_USB_OTG_HS);
+    status = ux_dcd_stm32_initialize((ULONG)USBX_DEVICE_USB_INSTANCE, (ULONG)&hpcd_USB_OTG_HS);
     usbx_dcd_init_status_dbg = status;
     if (status != UX_SUCCESS)
     {
@@ -1256,8 +1276,8 @@ UINT MX_USBX_Device_Init(void)
         return UX_ERROR;
     }
     USBX_MaskIISOIXFRIfEnabled();
-    usbx_gintmsk_after_start_dbg = USB_OTG_HS->GINTMSK;
-    usbx_gintsts_after_start_dbg = USB_OTG_HS->GINTSTS;
+    usbx_gintmsk_after_start_dbg = hpcd_USB_OTG_HS.Instance->GINTMSK;
+    usbx_gintsts_after_start_dbg = hpcd_USB_OTG_HS.Instance->GINTSTS;
 
     HAL_PWREx_EnableUSBVoltageDetector();
 
@@ -1273,15 +1293,9 @@ void MX_USBX_Device_Process(void)
         return;
     }
 
-    USBX_PollMaskedIISOIXFR();
-
     usbx_task_calls_dbg++;
     (void)_ux_system_tasks_run();
 
-    USBX_PollMaskedIISOIXFR();
-    USBX_Ep81HardRecoveryPoll();
-
     usbx_device_state_dbg = _ux_system_slave->ux_system_slave_device.ux_slave_device_state;
     usbx_device_speed_dbg = _ux_system_slave->ux_system_slave_speed;
-    USBX_FreezePoll();
 }

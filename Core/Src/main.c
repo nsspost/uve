@@ -47,8 +47,8 @@ uint16_t fb[320 * 480];
 
 volatile uint32_t uvc_process_from_main_poll_calls = 0;
 volatile uint32_t main_usb_only_mode = 1;
-volatile uint32_t main_stream_isolation_enable = 1;
-volatile uint32_t main_test_pattern_enable = 0;
+volatile uint32_t main_stream_isolation_enable = 0;
+volatile uint32_t main_test_pattern_enable = 1;
 volatile uint32_t main_test_pattern_updates = 0;
 volatile uint32_t main_test_pattern_period_ms = 500;
 volatile uint32_t main_test_pattern_phase = 0;
@@ -62,23 +62,20 @@ volatile uint32_t main_sdram_test_errors = 0;
 volatile uint32_t main_sdram_test_last_addr = 0;
 volatile uint32_t main_sdram_test_last_expected = 0;
 volatile uint32_t main_sdram_test_last_actual = 0;
-volatile uint32_t main_display_enable = 0;
+volatile uint32_t main_display_enable = 1;
 volatile uint32_t main_display_init_done = 0;
 volatile uint32_t main_display_pattern_done = 0;
 volatile uint32_t main_display_pattern_status = 0;
-volatile uint32_t main_jpeg_hw_enable = 0;
+volatile uint32_t main_jpeg_hw_enable = 1;
 volatile uint32_t main_mdma_init_done = 0;
 volatile uint32_t main_jpeg_init_done = 0;
-volatile uint32_t main_live_jpeg_enable = 0;
+volatile uint32_t main_live_jpeg_enable = 1;
 volatile uint32_t main_live_jpeg_init_done = 0;
 volatile uint32_t main_camera_pipeline_enable = 0;
 volatile uint32_t main_first_jpeg_ready_before_usb = 0;
 volatile uint32_t main_first_jpeg_size_before_usb = 0;
 volatile const uint8_t *main_first_jpeg_ptr_before_usb = 0;
 volatile uint32_t main_usb_only_loop_calls = 0;
-volatile uint32_t main_mpu_enable_dbg = 0;
-volatile uint32_t main_icache_enable_dbg = 0;
-volatile uint32_t main_dcache_enable_dbg = 0;
 volatile uint32_t dma2d_last_rgb565_color = 0;
 volatile uint32_t dma2d_last_argb8888_color = 0;
 
@@ -345,10 +342,6 @@ extern JPEG_HandleTypeDef hjpeg;
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-volatile uint32_t dbg_dbgmcu_idcode = 0U;
-volatile uint32_t dbg_dbgmcu_devid = 0U;
-volatile uint32_t dbg_dbgmcu_revid = 0U;
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -360,28 +353,6 @@ static void MPU_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-extern uint32_t jpeg_dbg_jpeg_irq_enabled;// = NVIC_GetEnableIRQ(JPEG_IRQn);
-extern uint32_t jpeg_dbg_jpeg_irq_pending;// = NVIC_GetPendingIRQ(JPEG_IRQn);
-extern uint32_t jpeg_dbg_mdma_irq_enabled;// = NVIC_GetEnableIRQ(MDMA_IRQn);
-extern uint32_t jpeg_dbg_mdma_irq_pending;// = NVIC_GetPendingIRQ(MDMA_IRQn);
-
-extern uint32_t jpeg_dbg_hjpeg_state;// = (uint32_t)hjpeg.State;
-extern uint32_t jpeg_dbg_hjpeg_error;// = (uint32_t)hjpeg.ErrorCode;
-extern uint32_t jpeg_dbg_in_length;// = hjpeg.InDataLength;
-extern uint32_t jpeg_dbg_out_length;// = hjpeg.OutDataLength;
-extern uint32_t jpeg_dbg_in_count;// = hjpeg.JpegInCount;
-extern uint32_t jpeg_dbg_out_count;// = hjpeg.JpegOutCount;
-
-extern uint32_t jpeg_dbg_hdmain_state;// = (uint32_t)hjpeg.hdmain->State;
-extern uint32_t jpeg_dbg_hdmaout_state;// = (uint32_t)hjpeg.hdmaout->State;
-
-/* прямое чтение регистров JPEG */
-extern  uint32_t jpeg_dbg_sr;// = hjpeg.Instance->SR;
-extern  uint32_t jpeg_dbg_cr;// = hjpeg.Instance->CR;
-
-extern uint32_t jpeg_dbg_rgb_input_index;// = g_rgb_input_index;
-extern uint32_t g_rgb_input_index;
-
 /* USER CODE END 0 */
 
 /**
@@ -396,17 +367,11 @@ int main(void)
 
   /* MPU Configuration--------------------------------------------------------*/
   MPU_Config();
-  main_mpu_enable_dbg = 1U;
-  main_icache_enable_dbg = 0U;
-  main_dcache_enable_dbg = 0U;
 
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-  dbg_dbgmcu_idcode = DBGMCU->IDCODE;
-  dbg_dbgmcu_devid = dbg_dbgmcu_idcode & 0x0FFFU;
-  dbg_dbgmcu_revid = dbg_dbgmcu_idcode >> 16;
 
   /* USER CODE BEGIN Init */
 
@@ -420,17 +385,7 @@ int main(void)
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
-//  MX_GPIO_Init();
-//  MX_DMA2D_Init();
-//  MX_FMC_Init();
-//  MX_LTDC_Init();
-//  MX_SPI5_Init();
-//  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
-
-
-
-//  HAL_Delay(200);
 
   MX_GPIO_Init();
   if (main_usb_init_early != 0U)
@@ -478,10 +433,7 @@ int main(void)
   {
       display_layer_init();
   }
-//  __HAL_RCC_SYSCFG_CLK_ENABLE();
-//  HAL_EnableCompensationCell();
 
-// отрисовка тестового фреймбуфера
   if (main_jpeg_init_done == 0U)
   {
       jpeg_hw_layer_init();
@@ -496,7 +448,6 @@ int main(void)
   }
   else
   {
-      main_test_pattern_enable = 0U;
       if (main_live_jpeg_enable != 0U)
       {
           camera_pipeline_force_test_jpeg = 0U;
@@ -512,8 +463,6 @@ int main(void)
       }
       main_camera_pipeline_enable = 1U;
   }
-  //camera_pipeline_init();
-  //camera_pipeline_update();   // <-- подготовить первый JPEG заранее
 
   if (main_usb_init_done == 0U)
   {
@@ -554,12 +503,8 @@ int main(void)
 
 
 
-      #define LCD_W 320
-#define LCD_H 480
 
 
-//      uvc_stream_init();
-//      uvc_stream_start();
 
 
 
@@ -569,7 +514,6 @@ int main(void)
           main_usb_only_loop_calls++;
 
     	  if ((main_stream_isolation_enable == 0U) &&
-    	      (main_usb_only_mode == 0U) &&
     	      (main_test_pattern_enable != 0U))
     	  {
     	      draw_stream_test_pattern();
@@ -589,71 +533,10 @@ int main(void)
     	      uvc_stream_poll_pending();
     	  }
 #endif
-//    	  if (uvc_stream_is_active())
-//    	      {
-//    	          uvc_stream_process();
-//    	          HAL_Delay(2);
-//    	      }
-
-    	    //  camera_pipeline_update();
-//
-//              dma2d_fill_screen(0xF800); // black
-//
-//              dma2d_fill_rect(0,   0, 320, 80,  0xF800); // red
-//              dma2d_fill_rect(0,  80, 320, 80,  0x07E0); // green
-//              dma2d_fill_rect(0, 160, 320, 80,  0x001F); // blue
-//              dma2d_fill_rect(0, 240, 320, 80,  0xFFE0); // yellow
-//              dma2d_fill_rect(0, 320, 320, 80,  0xF81F); // magenta
-//              dma2d_fill_rect(0, 400, 320, 80,  0x07FF); // cyan
-//              camera_pipeline_update();
-//
-//              HAL_Delay(10);
-//       //       camera_pipeline_update();
-//              dma2d_fill_screen(0xFFE0);
-//
-//              for (uint16_t i = 0; i < 100; i += 10)
-//              {
-//                  dma2d_fill_rect(10 + i, 10 + i, 80, 80, 0xFFFF); // white
-//                  dma2d_fill_rect(230 - i, 10 + i, 80, 80, 0xF800); // red
-//                  dma2d_fill_rect(10 + i, 390 - i, 80, 80, 0x07E0); // green
-//                  dma2d_fill_rect(230 - i, 390 - i, 80, 80, 0x001F); // blue
-//              }
-//              camera_pipeline_update();
-//
-//              HAL_Delay(10);
-//              jpeg_dbg_jpeg_irq_enabled = NVIC_GetEnableIRQ(JPEG_IRQn);
-//              jpeg_dbg_jpeg_irq_pending = NVIC_GetPendingIRQ(JPEG_IRQn);
-//              jpeg_dbg_mdma_irq_enabled = NVIC_GetEnableIRQ(MDMA_IRQn);
-//              jpeg_dbg_mdma_irq_pending = NVIC_GetPendingIRQ(MDMA_IRQn);
-//
-//              jpeg_dbg_hjpeg_state = (uint32_t)hjpeg.State;
-//              jpeg_dbg_hjpeg_error = (uint32_t)hjpeg.ErrorCode;
-//              jpeg_dbg_in_length = hjpeg.InDataLength;
-//              jpeg_dbg_out_length = hjpeg.OutDataLength;
-//              jpeg_dbg_in_count = hjpeg.JpegInCount;
-//              jpeg_dbg_out_count = hjpeg.JpegOutCount;
-//
-//              jpeg_dbg_hdmain_state = (uint32_t)hjpeg.hdmain->State;
-//              jpeg_dbg_hdmaout_state = (uint32_t)hjpeg.hdmaout->State;
-//
-//              /* прямое чтение регистров JPEG */
-//              jpeg_dbg_sr = hjpeg.Instance->SR;
-//              jpeg_dbg_cr = hjpeg.Instance->CR;
-
 
           }
-      //  ILI9488_Init();
-//  MX_LTDC_Init();
-//  MX_DMA2D_Init();
   HAL_Delay(200);
-  // тест sdram
-//  BSP_LCD_Init();
-//  BSP_LCD_SelectLayer(0);
-//  HAL_LTDC_SetAddress(&hltdc, (uint32_t)fb, 0);
-//  HAL_LTDC_Reload(&hltdc, LTDC_RELOAD_IMMEDIATE);
-  //fill_fb(0xF800);
 
-  //BSP_LCD_Clear(LCD_COLOR_RED);
   /* USER CODE END 2 */
 
   /* Infinite loop */

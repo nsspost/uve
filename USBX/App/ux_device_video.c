@@ -23,8 +23,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "stream1.h"
 #include "app_usbx_device.h"
+#include "video_source.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,6 +53,7 @@ UX_DEVICE_CLASS_VIDEO_STREAM *stream_write;
 UCHAR video_frame_buffer[512];
 
 static uint32_t video_packet_index = 0U;
+static uint32_t video_frame_sequence = 0U;
 static uint8_t video_fid = 1U;
 static uint8_t video_resync_fid_valid = 0U;
 static uint8_t video_resync_next_fid = 0U;
@@ -80,7 +81,7 @@ volatile ULONG usbx_video_last_offset_dbg = 0UL;
 volatile ULONG usbx_video_last_frame_size_dbg = 0UL;
 volatile ULONG usbx_video_get_fail_dbg = 0UL;
 volatile ULONG usbx_video_commit_fail_dbg = 0UL;
-volatile ULONG usbx_video_frame_interval_100ns_dbg = UVC_FRAME_INTERVAL_HS;
+volatile ULONG usbx_video_frame_interval_100ns_dbg = UVC_FRAME_INTERVAL_FS;
 volatile ULONG usbx_video_stream_task_state_dbg = 0UL;
 volatile ULONG usbx_video_stream_task_status_dbg = 0UL;
 volatile ULONG usbx_video_stream_error_dbg = 0UL;
@@ -116,6 +117,12 @@ volatile ULONG usbx_video_pace_now_dbg = 0UL;
 volatile ULONG usbx_video_pace_target_dbg = 0UL;
 volatile ULONG usbx_video_resync_delay_cfg_ms_dbg = 0UL;
 volatile ULONG usbx_video_resync_ll_recovery_cleared_dbg = 0UL;
+volatile ULONG usbx_video_resync_clear_ll_recovery_on_empty_enable_dbg = 1UL;
+volatile ULONG usbx_video_resync_ll_recovery_kept_dbg = 0UL;
+volatile ULONG usbx_video_iso_recovery_fast_resync_enable_dbg = 0UL;
+volatile ULONG usbx_video_iso_recovery_fast_resync_count_dbg = 0UL;
+volatile ULONG usbx_video_iso_recovery_fast_resync_now_dbg = 0UL;
+volatile ULONG usbx_video_iso_recovery_fast_resync_prev_target_dbg = 0UL;
 volatile ULONG usbx_video_payload_fill_calls_dbg = 0UL;
 volatile ULONG usbx_video_payload_fill_count_dbg = 0UL;
 volatile ULONG usbx_video_payload_fill_full_dbg = 0UL;
@@ -265,7 +272,7 @@ VOID USBD_VIDEO_StreamChange(UX_DEVICE_CLASS_VIDEO_STREAM *video_stream,
     /* Update State machine */
     uvc_state = UVC_PLAY_STATUS_STOP;
 
-    img_count = 0U;
+    video_frame_sequence = 0U;
     video_packet_index = 0U;
     video_fid = 1U;
     video_resync_fid_valid = 0U;
@@ -307,6 +314,7 @@ VOID USBD_VIDEO_StreamChange(UX_DEVICE_CLASS_VIDEO_STREAM *video_stream,
   usb_ll_iso_after_recovery_dbg = 0U;
   usbx_iisoixfr_recovery_retry_count_dbg = 0UL;
   video_packet_index = 0U;
+  video_frame_sequence = 0U;
   usbx_video_frame_interval_100ns_dbg = USBD_VIDEO_GetFrameInterval100ns();
 
   /* Prime the standalone USBX payload queue like the STM example. */
@@ -408,23 +416,39 @@ VOID USBD_VIDEO_StreamPayloadDone(UX_DEVICE_CLASS_VIDEO_STREAM *video_stream,
       {
         video_resync_next_fid = video_fid;
         usbx_video_resync_fid_action_dbg = 1UL;
-        usb_ll_iso_after_recovery_dbg = 0U;
-        usbx_video_resync_ll_recovery_cleared_dbg++;
+        if (usbx_video_resync_clear_ll_recovery_on_empty_enable_dbg != 0UL)
+        {
+          usb_ll_iso_after_recovery_dbg = 0U;
+          usbx_video_resync_ll_recovery_cleared_dbg++;
+        }
+        else
+        {
+          usbx_video_resync_ll_recovery_kept_dbg++;
+        }
       }
 
       video_resync_fid_valid = 1U;
       video_done_packets_in_frame = 0U;
       video_frame_delay_pending = 1U;
 
-      video_packet_index = 0U;
-      img_count++;
-      if (img_count == IMG_NBR)
+      if (usbx_video_iso_recovery_fast_resync_enable_dbg != 0UL)
       {
-        img_count = 0U;
+        ULONG now = ux_utility_time_get();
+
+        usbx_video_iso_recovery_fast_resync_count_dbg++;
+        usbx_video_iso_recovery_fast_resync_now_dbg = now;
+        usbx_video_iso_recovery_fast_resync_prev_target_dbg = video_next_frame_tick;
+        video_next_frame_tick = now;
+        video_frame_pacer_armed = 0U;
+        video_frame_pacer_wait_logged = 0U;
+        usbx_video_pace_target_dbg = video_next_frame_tick;
       }
 
+      video_packet_index = 0U;
+      video_frame_sequence++;
+
       usbx_video_packet_index_dbg = video_packet_index;
-      usbx_video_img_count_dbg = img_count;
+      usbx_video_img_count_dbg = video_frame_sequence;
       usbx_video_fid_dbg = video_fid;
       usbx_video_resync_next_fid_dbg = video_resync_next_fid;
       usbx_video_done_packets_in_frame_dbg = video_done_packets_in_frame;
@@ -435,7 +459,7 @@ VOID USBD_VIDEO_StreamPayloadDone(UX_DEVICE_CLASS_VIDEO_STREAM *video_stream,
                     usbx_video_resync_count_dbg,
                     usbx_video_iso_recovery_pending_dbg,
                     length,
-                    img_count,
+                    video_frame_sequence,
                     video_packet_index,
                     usbx_video_resync_delay_ms_dbg,
                     usbx_iisoixfr_recovery_calls_dbg,
@@ -844,7 +868,7 @@ static VOID USBD_VIDEO_PaceFrameStart(void)
                     now,
                     video_next_frame_tick,
                     video_frame_delay_pending,
-                    img_count,
+                    video_frame_sequence,
                     video_packet_index,
                     video_fid,
                     usbx_video_write_calls_dbg,
@@ -882,10 +906,12 @@ VOID video_write_payload(UX_DEVICE_CLASS_VIDEO_STREAM *stream)
   UCHAR *buffer = UX_NULL;
   ULONG usbd_video_ep_mps = stream->ux_device_class_video_stream_endpoint->ux_slave_endpoint_descriptor.wMaxPacketSize;
   ULONG length = 0UL;
-  const uint8_t *(*ImagePtr)= tImagesList;
-  uint32_t frame_size = tImagesSizes[img_count];
-  uint32_t payload_capacity = (uint32_t)usbd_video_ep_mps - 2U;
-  uint32_t packets_per_frame = (frame_size + payload_capacity - 1U) / payload_capacity;
+  const video_frame_t *frame = UX_NULL;
+  const uint8_t *frame_data = UX_NULL;
+  uint32_t frame_size = 0U;
+  uint32_t payload_capacity = ((uint32_t)usbd_video_ep_mps > 2U) ?
+                              ((uint32_t)usbd_video_ep_mps - 2U) : 0U;
+  uint32_t packets_per_frame = 0U;
   uint32_t payload_offset = 0U;
   uint32_t payload_length = 0U;
   uint32_t eof_packet = 0U;
@@ -934,21 +960,19 @@ VOID video_write_payload(UX_DEVICE_CLASS_VIDEO_STREAM *stream)
       /* Reset video frame buffer */
       ux_utility_memory_set(video_frame_buffer, 0, usbd_video_ep_mps);
 
-      if ((payload_capacity == 0U) || (frame_size == 0U))
+      if (payload_capacity == 0U)
       {
         length = 2U;
         header_info = (uint8_t)(video_fid | 0x02U);
       }
       else
       {
-        if (video_packet_index >= packets_per_frame)
-        {
-          video_packet_index = 0U;
-        }
-
         if(video_packet_index == 0U)
         {
+          bool repeated = false;
+
           USBD_VIDEO_PaceFrameStart();
+          (void)video_source_prepare_next_frame(&repeated);
 
           if (video_resync_fid_valid != 0U)
           {
@@ -962,57 +986,73 @@ VOID video_write_payload(UX_DEVICE_CLASS_VIDEO_STREAM *stream)
           usbx_video_fid_dbg = video_fid;
         }
 
-        payload_offset = video_packet_index * payload_capacity;
-        payload_length = frame_size - payload_offset;
-        if (payload_length > payload_capacity)
+        frame = video_source_get_current_frame();
+        if ((frame != UX_NULL) && (frame->data != UX_NULL) && (frame->size != 0U))
         {
-          payload_length = payload_capacity;
+          frame_data = frame->data;
+          frame_size = frame->size;
         }
 
-        header_info = video_fid;
-        if ((payload_offset + payload_length) >= frame_size)
+        if (frame_size == 0U)
         {
-          header_info = (uint8_t)(header_info | 0x02U);
-          eof_packet = 1U;
-          usbx_video_frame_eof_dbg++;
+          length = 2U;
+          header_info = (uint8_t)(video_fid | 0x02U);
         }
-
-        length = payload_length + 2U;
-
-        ux_utility_memory_copy((video_frame_buffer + 2U),
-                               (VOID *)(*(ImagePtr + img_count) + payload_offset),
-                               payload_length);
-
-        video_packet_index++;
-
-        if (video_packet_index >= packets_per_frame)
+        else
         {
-          video_packet_index = 0U;
-          if (eof_packet != 0U)
+          packets_per_frame = (frame_size + payload_capacity - 1U) / payload_capacity;
+          if (video_packet_index >= packets_per_frame)
           {
-            USBX_TraceLog(USBX_TRACE_EVT_VIDEO_EOF,
-                          usbx_video_write_calls_dbg,
-                          length,
-                          header_info,
-                          img_count,
-                          video_packet_index,
-                          packets_per_frame,
-                          payload_offset,
-                          payload_length,
-                          frame_size,
-                          usbx_video_payload_done_dbg,
-                          buffer_length,
-                          usbx_video_frame_eof_dbg);
+            video_packet_index = 0U;
           }
 
-          img_count++;
-          usbx_video_frame_interval_100ns_dbg = USBD_VIDEO_GetFrameInterval100ns();
-          video_frame_delay_pending = 1U;
-          usbx_video_frame_delay_pending_dbg = video_frame_delay_pending;
-
-          if (img_count == IMG_NBR)
+          payload_offset = video_packet_index * payload_capacity;
+          payload_length = frame_size - payload_offset;
+          if (payload_length > payload_capacity)
           {
-            img_count = 0U;
+            payload_length = payload_capacity;
+          }
+
+          header_info = video_fid;
+          if ((payload_offset + payload_length) >= frame_size)
+          {
+            header_info = (uint8_t)(header_info | 0x02U);
+            eof_packet = 1U;
+            usbx_video_frame_eof_dbg++;
+          }
+
+          length = payload_length + 2U;
+
+          ux_utility_memory_copy((video_frame_buffer + 2U),
+                                 (VOID *)(frame_data + payload_offset),
+                                 payload_length);
+
+          video_packet_index++;
+
+          if (video_packet_index >= packets_per_frame)
+          {
+            video_packet_index = 0U;
+            if (eof_packet != 0U)
+            {
+              USBX_TraceLog(USBX_TRACE_EVT_VIDEO_EOF,
+                            usbx_video_write_calls_dbg,
+                            length,
+                            header_info,
+                            video_frame_sequence,
+                            video_packet_index,
+                            packets_per_frame,
+                            payload_offset,
+                            payload_length,
+                            frame_size,
+                            usbx_video_payload_done_dbg,
+                            buffer_length,
+                            usbx_video_frame_eof_dbg);
+            }
+
+            video_frame_sequence++;
+            usbx_video_frame_interval_100ns_dbg = USBD_VIDEO_GetFrameInterval100ns();
+            video_frame_delay_pending = 1U;
+            usbx_video_frame_delay_pending_dbg = video_frame_delay_pending;
           }
         }
       }
@@ -1034,7 +1074,7 @@ VOID video_write_payload(UX_DEVICE_CLASS_VIDEO_STREAM *stream)
   }
   ux_utility_memory_copy(buffer, video_frame_buffer, length);
   usbx_video_last_payload_len_dbg = length;
-  usbx_video_img_count_dbg = img_count;
+  usbx_video_img_count_dbg = video_frame_sequence;
   usbx_video_packet_index_dbg = video_packet_index;
   usbx_video_packets_per_frame_dbg = packets_per_frame;
   usbx_video_last_header_dbg = header_info;
@@ -1054,7 +1094,7 @@ VOID video_write_payload(UX_DEVICE_CLASS_VIDEO_STREAM *stream)
                 usbx_video_commit_status_dbg,
                 length,
                 header_info,
-                img_count,
+                video_frame_sequence,
                 video_packet_index,
                 packets_per_frame,
                 payload_offset,

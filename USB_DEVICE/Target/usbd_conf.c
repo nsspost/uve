@@ -180,7 +180,9 @@ static void USB_MaskIISOIXFRIfEnabled(void)
 void HAL_PCD_MspInit(PCD_HandleTypeDef* pcdHandle)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+  RCC_CRSInitTypeDef CRSInitStruct = {0};
   HAL_StatusTypeDef clock_status;
 
   usb_msp_init_calls++;
@@ -259,6 +261,57 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef* pcdHandle)
 
   /* USER CODE END USB_OTG_HS_MspInit 1 */
   }
+  else if(pcdHandle->Instance==USB_OTG_FS)
+  {
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48;
+    RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
+    clock_status = HAL_RCC_OscConfig(&RCC_OscInitStruct);
+    usb_msp_clock_config_status = (uint32_t)clock_status;
+    if (clock_status != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USB;
+    PeriphClkInitStruct.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
+    clock_status = HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct);
+    usb_msp_clock_config_status = (uint32_t)clock_status;
+    if (clock_status != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    __HAL_RCC_CRS_CLK_ENABLE();
+    CRSInitStruct.Prescaler = RCC_CRS_SYNC_DIV1;
+    CRSInitStruct.Source = RCC_CRS_SYNC_SOURCE_USB2;
+    CRSInitStruct.Polarity = RCC_CRS_SYNC_POLARITY_RISING;
+    CRSInitStruct.ReloadValue = RCC_CRS_RELOADVALUE_DEFAULT;
+    CRSInitStruct.ErrorLimitValue = RCC_CRS_ERRORLIMIT_DEFAULT;
+    CRSInitStruct.HSI48CalibrationValue = RCC_CRS_HSI48CALIBRATION_DEFAULT;
+    HAL_RCCEx_CRSConfig(&CRSInitStruct);
+
+    HAL_PWREx_EnableUSBVoltageDetector();
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    /**USB_OTG_FS GPIO Configuration
+    PA11     ------> USB_OTG_FS_DM
+    PA12     ------> USB_OTG_FS_DP
+    */
+    GPIO_InitStruct.Pin = GPIO_PIN_11|GPIO_PIN_12;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF10_OTG1_FS;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    usb_msp_gpio_done = 1U;
+
+    __HAL_RCC_USB_OTG_FS_CLK_ENABLE();
+    usb_msp_clk_enable_done = 1U;
+
+    HAL_NVIC_SetPriority(OTG_FS_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(OTG_FS_IRQn);
+    usb_msp_nvic_done = 1U;
+  }
 }
 
 void HAL_PCD_MspDeInit(PCD_HandleTypeDef* pcdHandle)
@@ -299,6 +352,18 @@ void HAL_PCD_MspDeInit(PCD_HandleTypeDef* pcdHandle)
   /* USER CODE BEGIN USB_OTG_HS_MspDeInit 1 */
 
   /* USER CODE END USB_OTG_HS_MspDeInit 1 */
+  }
+  else if(pcdHandle->Instance==USB_OTG_FS)
+  {
+    __HAL_RCC_USB_OTG_FS_CLK_DISABLE();
+
+    /**USB_OTG_FS GPIO Configuration
+    PA11     ------> USB_OTG_FS_DM
+    PA12     ------> USB_OTG_FS_DP
+    */
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_11|GPIO_PIN_12);
+
+    HAL_NVIC_DisableIRQ(OTG_FS_IRQn);
   }
 }
 

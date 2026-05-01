@@ -9,14 +9,13 @@
 #define UVC_IN_EP                    0x81U
 #define UVC_IN_PACKET                512U
 #define UVC_HS_EP_INTERVAL           1U
-/* Diagnostic 10 ms frame pacing: reduces header-only gaps without flooding host. */
-#define UVC_FRAME_INTERVAL_100NS     100000U
+#define UVC_FRAME_INTERVAL_100NS     330000U
 #define UVC_FRAME_INTERVAL_MS        ((UVC_FRAME_INTERVAL_100NS + 9999U) / 10000U)
 #define UVC_FRAME_WIDTH              160U
 #define UVC_FRAME_HEIGHT             120U
 #define UVC_MAX_FRAME_SIZE           8192U
 #define UVC_FRAME_RATE               ((10000000U + (UVC_FRAME_INTERVAL_100NS / 2U)) / UVC_FRAME_INTERVAL_100NS)
-#define UVC_PRODUCER_INTERVAL_MS     200U
+#define UVC_PRODUCER_INTERVAL_MS     33U
 #define UVC_FRAME_BITRATE            (UVC_MAX_FRAME_SIZE * 8U * UVC_FRAME_RATE)
 
 #define UVC_VC_IF_NUM                0U
